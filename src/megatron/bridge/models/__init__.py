@@ -222,6 +222,14 @@ from megatron.bridge.models.stepfun import (
 from megatron.bridge.models.t5_provider import T5ModelProvider
 
 
+# Keep other Bridge model imports usable when an external MCore lacks QwenAir.
+_QWENAIR_EXPORTS = []
+if importlib.util.find_spec("megatron.core.models.qwenair") is not None:
+    from megatron.bridge.models.qwenair import QwenAirModelProvider, QwenAirTextBridge
+
+    _QWENAIR_EXPORTS = ["QwenAirModelProvider", "QwenAirTextBridge"]
+
+
 __all__ = [
     "AutoBridge",
     "MegatronMappingRegistry",
@@ -352,3 +360,4 @@ __all__ = [
     "ExaoneMoeBridge",
     "ExaoneMoeModelProvider",
 ] + _BAGEL_EXPORTS
+__all__.extend(_QWENAIR_EXPORTS)

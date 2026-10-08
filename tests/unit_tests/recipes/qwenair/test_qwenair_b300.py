@@ -30,6 +30,7 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.train.global_batch_size == 8
     assert cfg.train.micro_batch_size == 1
     assert cfg.dataset.seq_length == 64
+    assert cfg.tokenizer.null_tokenizer_eod_id == _tiny_text_config()["eos_token_id"]
     assert cfg.ddp.use_distributed_optimizer is True
     assert cfg.ddp.average_in_collective is False
     assert cfg.mixed_precision.bf16 is True

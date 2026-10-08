@@ -136,6 +136,7 @@ def _base_recipe(
     cfg.tokenizer.tokenizer_type = "NullTokenizer"
     cfg.tokenizer.tokenizer_model = None
     cfg.tokenizer.vocab_size = int(text["vocab_size"])
+    cfg.tokenizer.null_tokenizer_eod_id = int(text["eos_token_id"])
     cfg.tokenizer.use_tokenizer_vocab_size = False
     cfg.dataset.seq_length = seq_length
     cfg.dataset.blend = None

@@ -80,8 +80,6 @@ def forward_step(
     # QwenAir model not to shift them a second time.
     valid = loss_mask.bool()
     valid_tokens = valid.sum(dtype=torch.int64)
-    if valid_tokens.item() == 0:
-        raise ValueError("QwenAir requires at least one valid next-token label per rank")
     masked_labels = torch.where(valid, labels, -100)
 
     output = model(

@@ -25,6 +25,7 @@ from transformers import PretrainedConfig
 from megatron.bridge.models.conversion.auto_bridge import AutoBridge
 from megatron.bridge.models.qwenair import QwenAirModelProvider, QwenAirTextBridge, qwenair_provider
 from megatron.bridge.models.qwenair.qwenair_bridge import qwenair_logical_state_names
+from megatron.bridge.models.qwenair.qwenair_step import qwenair_loss
 
 
 def _tiny_text_config() -> dict:
@@ -139,6 +140,9 @@ def test_small_model_has_complete_identity_mapping_and_roundtrips() -> None:
 
     assert len(model.model.layers) == 4
     assert provider.qsa_backend == "dense"
+    assert model.config.num_layers == provider.num_layers
+    assert model.config.params_dtype == provider.params_dtype
+    assert model.config.calculate_per_token_loss == provider.calculate_per_token_loss
     assert model.model.layers[3].self_attn.backend == "dense"
     assert [layer.layer_type for layer in model.model.layers] == [
         "linear_attention",
@@ -185,13 +189,17 @@ def test_small_model_has_complete_identity_mapping_and_roundtrips() -> None:
 def test_provider_rejects_unimplemented_parallel_and_mtp() -> None:
     provider = QwenAirModelProvider.from_hf_config(_tiny_text_config())
     provider.tensor_model_parallel_size = 2
-    with pytest.raises(NotImplementedError, match="one rank"):
+    with pytest.raises(NotImplementedError, match="parallel layout"):
         provider.provide()
     provider.tensor_model_parallel_size = 1
     provider.expert_tensor_parallel_size = 2
     with pytest.raises(NotImplementedError, match="expert_tensor_parallel_size"):
         provider.provide()
     provider.expert_tensor_parallel_size = None
+    provider.expert_model_parallel_size = 2
+    with pytest.raises(RuntimeError, match="provide_distributed_model"):
+        provider.provide()
+    provider.expert_model_parallel_size = 1
     provider.mtp_num_layers = 1
     with pytest.raises(NotImplementedError, match="MTP"):
         provider.provide()
@@ -213,7 +221,7 @@ def test_te_backend_requires_fork_api_and_selects_mcore_path(monkeypatch: pytest
     provider = QwenAirModelProvider.from_hf_config(config, qsa_backend="te_reference")
     assert provider.qsa_backend == "te_reference"
     monkeypatch.setattr(qwenair_provider.importlib, "import_module", lambda _name: SimpleNamespace())
-    with pytest.raises(ImportError, match="TransformerEngine@1fc9527a"):
+    with pytest.raises(ImportError, match="TransformerEngine@c4f14012"):
         provider.provide()
 
     def qsa_reference(query, key, value, selected_key_blocks, *, scale=None):
@@ -226,3 +234,42 @@ def test_te_backend_requires_fork_api_and_selects_mcore_path(monkeypatch: pytest
     )
     model = provider.provide()
     assert model.model.layers[3].self_attn.backend == "te_reference"
+
+
+def test_indexed_te_backend_checks_its_own_callable(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = QwenAirModelProvider.from_hf_config(_tiny_text_config(), qsa_backend="te_indexed_sdpa")
+
+    def qsa_reference(query, key, value, selected_key_blocks, *, scale=None):
+        return query
+
+    monkeypatch.setattr(
+        qwenair_provider.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(qsa_block_sparse_attention=qsa_reference),
+    )
+    with pytest.raises(ImportError, match="te_indexed_sdpa"):
+        provider.provide()
+
+    monkeypatch.setattr(
+        qwenair_provider.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(qsa_indexed_sdpa_attention=qsa_reference),
+    )
+    model = provider.provide()
+    assert model.model.layers[3].self_attn.backend == "te_indexed_sdpa"
+
+
+def test_qwenair_loss_preserves_scaled_backward_and_reports_components() -> None:
+    scaled = torch.tensor(3.5, requires_grad=True)
+    loss, num_tokens, metrics = qwenair_loss(
+        scaled,
+        num_tokens=torch.tensor(3, dtype=torch.int),
+        reporting_loss_sum=torch.tensor(6.0),
+        router_aux_loss_sum=torch.tensor(0.75),
+    )
+    loss.backward()
+
+    assert scaled.grad.item() == 1.0
+    assert num_tokens.item() == 3
+    assert torch.equal(metrics["lm loss"], torch.tensor([6.0, 3.0]))
+    assert torch.equal(metrics["router aux loss"], torch.tensor([0.75, 3.0]))

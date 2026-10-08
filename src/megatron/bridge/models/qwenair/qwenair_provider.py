@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-rank provider for the Qwen4-Exp text reference in Megatron-Core."""
+"""Provider for the Qwen4-Exp text model implemented in Megatron-Core."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from typing import Any, Literal, Mapping
 
 import torch
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.transformer_config import TransformerConfig as MCoreTransformerConfig
 
 
 try:
@@ -52,13 +53,23 @@ def _require_qwenair_mcore_api() -> None:
     }
     forward = getattr(QwenAirForCausalLM, "forward", None)
     forward_fields = set(signature(forward).parameters) if callable(forward) else set()
-    required_forward = {"input_ids", "attention_mask", "position_ids", "labels", "output_router_logits", "enable_mtp"}
+    init_fields = set(signature(QwenAirForCausalLM.__init__).parameters)
+    required_forward = {
+        "input_ids",
+        "attention_mask",
+        "position_ids",
+        "labels",
+        "labels_are_shifted",
+        "output_router_logits",
+        "enable_mtp",
+    }
     if (
         not callable(getattr(QwenAirTextConfig, "from_hf_dict", None))
         or not required_fields <= config_fields
         or not isinstance(QwenAirForCausalLM, type)
         or not issubclass(QwenAirForCausalLM, MegatronModule)
         or not required_forward <= forward_fields
+        or "pg_collection" not in init_fields
     ):
         raise RuntimeError(
             "QwenAir Bridge requires the matching Megatron-Core QwenAir text API; "
@@ -66,21 +77,25 @@ def _require_qwenair_mcore_api() -> None:
         )
 
 
-def _require_te_qsa_api() -> None:
+def _require_te_qsa_api(backend: str) -> None:
     """Check the QSA callable added by the QwenAir Transformer Engine fork."""
-    required_commit = "shangxiaokang/TransformerEngine@1fc9527a8bf7a7ffcb607119e96967fae3e7b7fc"
+    required_commit = "shangxiaokang/TransformerEngine@c4f14012b02b9162b585794a4abb5e6946b8835f"
     try:
         te = importlib.import_module("transformer_engine.pytorch")
     except (ImportError, OSError) as exc:
         raise ImportError(f"qsa_backend='te_reference' requires {required_commit}") from exc
-    qsa = getattr(te, "qsa_block_sparse_attention", None)
+    function_name = {
+        "te_reference": "qsa_block_sparse_attention",
+        "te_indexed_sdpa": "qsa_indexed_sdpa_attention",
+    }[backend]
+    qsa = getattr(te, function_name, None)
     expected = {"query", "key", "value", "selected_key_blocks", "scale"}
     try:
         available = set(signature(qsa).parameters) if callable(qsa) else set()
     except (TypeError, ValueError):
         available = set()
     if not expected <= available:
-        raise ImportError(f"qsa_backend='te_reference' requires the QSA API from {required_commit}")
+        raise ImportError(f"qsa_backend={backend!r} requires the QSA API from {required_commit}")
 
 
 def _config_dict(config: Any) -> dict[str, Any]:
@@ -117,21 +132,25 @@ def _parameter_dtype(text: Mapping[str, Any]) -> torch.dtype:
 
 @dataclass
 class QwenAirModelProvider(GPTModelProvider):
-    """Construct the text-only reference model from a Qwen4-Exp text config.
+    """Construct the text-only model from a Qwen4-Exp text config.
 
-    The implementation intentionally supports one TP, PP, EP, ETP and CP rank.
-    It does not implement the checkpoint's MTP training objective or the QSA
-    indexer's separate objective. A successful forward/backward smoke is not a
-    complete QwenAir pretraining acceptance result.
+    Expert parallelism and expert-data-parallel replicas use the explicit
+    process groups installed by :class:`ModelProviderMixin`. TP, PP, CP and
+    expert TP remain fail-closed. The checkpoint's MTP training objective and
+    the QSA indexer's separate objective are also unavailable, so a successful
+    LM forward/backward run is not a complete pretraining acceptance result.
     """
 
     qwenair_text_config: dict[str, Any] = field(default_factory=dict)
-    qsa_backend: Literal["dense", "te_reference"] = "dense"
+    qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa"] = "dense"
     mtp_num_layers: int | None = 0
 
     @classmethod
     def from_hf_config(
-        cls, hf_config: Any, *, qsa_backend: Literal["dense", "te_reference"] = "dense"
+        cls,
+        hf_config: Any,
+        *,
+        qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa"] = "dense",
     ) -> QwenAirModelProvider:
         """Build a provider from a standalone ``qwen4_exp_text`` config."""
         _require_qwenair_mcore_api()
@@ -175,18 +194,17 @@ class QwenAirModelProvider(GPTModelProvider):
         post_process: bool | None = None,
         vp_stage: int | None = None,
     ) -> QwenAirForCausalLM:
-        """Instantiate the single-rank text model after checking layout limits."""
+        """Instantiate the text model with explicit EP and expert-DP groups."""
         _require_qwenair_mcore_api()
         if not self.qwenair_text_config:
             raise ValueError("qwenair_text_config must be supplied")
-        parallel_fields = (
+        unsupported_fields = (
             "tensor_model_parallel_size",
             "pipeline_model_parallel_size",
-            "expert_model_parallel_size",
             "context_parallel_size",
         )
-        unsupported = {name: getattr(self, name) for name in parallel_fields if getattr(self, name) != 1}
-        # MCore resolves an unset ETP size to TP size, which is required to be one above.
+        unsupported = {name: getattr(self, name) for name in unsupported_fields if getattr(self, name) != 1}
+        # MCore resolves an unset ETP size to TP size, which is one above.
         if self.expert_tensor_parallel_size not in (None, 1):
             unsupported["expert_tensor_parallel_size"] = self.expert_tensor_parallel_size
         if self.sequence_parallel:
@@ -196,12 +214,30 @@ class QwenAirModelProvider(GPTModelProvider):
         if vp_stage is not None:
             unsupported["vp_stage"] = vp_stage
         if unsupported:
-            raise NotImplementedError(f"QwenAir text reference supports one rank only: {unsupported}")
+            raise NotImplementedError(f"QwenAir does not yet support this parallel layout: {unsupported}")
         if pre_process is False or post_process is False:
             raise NotImplementedError("QwenAir text reference does not support pipeline stage splits")
         if self.mtp_enabled or self.mtp_num_layers not in (None, 0):
             raise NotImplementedError("QwenAir MTP training contract is unavailable")
-        if self.qsa_backend == "te_reference":
-            _require_te_qsa_api()
+        if self.qsa_backend in ("te_reference", "te_indexed_sdpa"):
+            _require_te_qsa_api(self.qsa_backend)
         config = QwenAirTextConfig.from_hf_dict({**self.qwenair_text_config, "qsa_backend": self.qsa_backend})
-        return QwenAirForCausalLM(config)
+
+        # QwenAirTextConfig owns the model-specific geometry. MCore DDP and the
+        # pipeline schedule also read TransformerConfig runtime fields from
+        # ``model.config``. Copy those fields from the finalized Bridge provider
+        # so there is one duck-typed config object rather than two divergent
+        # sources of parallel and precision policy.
+        for config_field in fields(MCoreTransformerConfig):
+            setattr(config, config_field.name, getattr(self, config_field.name))
+        config.expert_model_parallel_size = self.expert_model_parallel_size
+        config.expert_tensor_parallel_size = self.expert_tensor_parallel_size or 1
+        config.validate()
+
+        pg_collection = self._pg_collection
+        if config.expert_model_parallel_size > 1 and pg_collection is None:
+            raise RuntimeError(
+                "QwenAir expert parallelism requires provide_distributed_model() "
+                "or an explicit provider._pg_collection"
+            )
+        return QwenAirForCausalLM(config, pg_collection=pg_collection)

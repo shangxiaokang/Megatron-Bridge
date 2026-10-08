@@ -42,6 +42,10 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
 
 def test_tiny_recipe_config_constructs_te_triton_model(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = qwenair_tiny_pretrain_8gpu_b300_bf16_config()
+    single_rank_text = dict(cfg.model.qwenair_text_config)
+    single_rank_text["expert_model_parallel_size"] = 1
+    single_rank_text["max_single_rank_ple_elements"] *= cfg.model.expert_model_parallel_size
+    single_rank_text["max_single_rank_parameters"] *= cfg.model.expert_model_parallel_size
 
     def qsa_triton(
         query,
@@ -60,7 +64,7 @@ def test_tiny_recipe_config_constructs_te_triton_model(monkeypatch: pytest.Monke
         lambda _name: SimpleNamespace(qsa_triton_attention=qsa_triton),
     )
     provider = QwenAirModelProvider.from_hf_config(
-        cfg.model.qwenair_text_config,
+        single_rank_text,
         qsa_backend=cfg.model.qsa_backend,
     )
 

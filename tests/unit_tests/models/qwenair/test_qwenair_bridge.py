@@ -188,6 +188,10 @@ def test_provider_rejects_unimplemented_parallel_and_mtp() -> None:
     with pytest.raises(NotImplementedError, match="one rank"):
         provider.provide()
     provider.tensor_model_parallel_size = 1
+    provider.expert_tensor_parallel_size = 2
+    with pytest.raises(NotImplementedError, match="expert_tensor_parallel_size"):
+        provider.provide()
+    provider.expert_tensor_parallel_size = None
     provider.mtp_num_layers = 1
     with pytest.raises(NotImplementedError, match="MTP"):
         provider.provide()

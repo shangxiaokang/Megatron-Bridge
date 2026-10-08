@@ -183,10 +183,12 @@ class QwenAirModelProvider(GPTModelProvider):
             "tensor_model_parallel_size",
             "pipeline_model_parallel_size",
             "expert_model_parallel_size",
-            "expert_tensor_parallel_size",
             "context_parallel_size",
         )
         unsupported = {name: getattr(self, name) for name in parallel_fields if getattr(self, name) != 1}
+        # MCore resolves an unset ETP size to TP size, which is required to be one above.
+        if self.expert_tensor_parallel_size not in (None, 1):
+            unsupported["expert_tensor_parallel_size"] = self.expert_tensor_parallel_size
         if self.sequence_parallel:
             unsupported["sequence_parallel"] = True
         if self.virtual_pipeline_model_parallel_size is not None:

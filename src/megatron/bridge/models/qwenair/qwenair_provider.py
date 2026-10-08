@@ -79,17 +79,30 @@ def _require_qwenair_mcore_api() -> None:
 
 def _require_te_qsa_api(backend: str) -> None:
     """Check the QSA callable added by the QwenAir Transformer Engine fork."""
-    required_commit = "shangxiaokang/TransformerEngine@c4f14012b02b9162b585794a4abb5e6946b8835f"
+    requirements = {
+        "te_reference": (
+            "qsa_block_sparse_attention",
+            "shangxiaokang/TransformerEngine@c4f14012b02b9162b585794a4abb5e6946b8835f",
+            set(),
+        ),
+        "te_indexed_sdpa": (
+            "qsa_indexed_sdpa_attention",
+            "shangxiaokang/TransformerEngine@c4f14012b02b9162b585794a4abb5e6946b8835f",
+            set(),
+        ),
+        "te_triton": (
+            "qsa_triton_attention",
+            "shangxiaokang/TransformerEngine@3250741db1e06acd638da6124bc193405565f771",
+            {"validate_indices"},
+        ),
+    }
+    function_name, required_commit, backend_parameters = requirements[backend]
     try:
         te = importlib.import_module("transformer_engine.pytorch")
     except (ImportError, OSError) as exc:
-        raise ImportError(f"qsa_backend='te_reference' requires {required_commit}") from exc
-    function_name = {
-        "te_reference": "qsa_block_sparse_attention",
-        "te_indexed_sdpa": "qsa_indexed_sdpa_attention",
-    }[backend]
+        raise ImportError(f"qsa_backend={backend!r} requires {required_commit}") from exc
     qsa = getattr(te, function_name, None)
-    expected = {"query", "key", "value", "selected_key_blocks", "scale"}
+    expected = {"query", "key", "value", "selected_key_blocks", "scale", *backend_parameters}
     try:
         available = set(signature(qsa).parameters) if callable(qsa) else set()
     except (TypeError, ValueError):
@@ -142,7 +155,7 @@ class QwenAirModelProvider(GPTModelProvider):
     """
 
     qwenair_text_config: dict[str, Any] = field(default_factory=dict)
-    qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa"] = "dense"
+    qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa", "te_triton"] = "dense"
     mtp_num_layers: int | None = 0
 
     @classmethod
@@ -150,7 +163,7 @@ class QwenAirModelProvider(GPTModelProvider):
         cls,
         hf_config: Any,
         *,
-        qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa"] = "dense",
+        qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa", "te_triton"] = "dense",
     ) -> QwenAirModelProvider:
         """Build a provider from a standalone ``qwen4_exp_text`` config."""
         _require_qwenair_mcore_api()
@@ -219,7 +232,7 @@ class QwenAirModelProvider(GPTModelProvider):
             raise NotImplementedError("QwenAir text reference does not support pipeline stage splits")
         if self.mtp_enabled or self.mtp_num_layers not in (None, 0):
             raise NotImplementedError("QwenAir MTP training contract is unavailable")
-        if self.qsa_backend in ("te_reference", "te_indexed_sdpa"):
+        if self.qsa_backend in ("te_reference", "te_indexed_sdpa", "te_triton"):
             _require_te_qsa_api(self.qsa_backend)
         config = QwenAirTextConfig.from_hf_dict({**self.qwenair_text_config, "qsa_backend": self.qsa_backend})
 

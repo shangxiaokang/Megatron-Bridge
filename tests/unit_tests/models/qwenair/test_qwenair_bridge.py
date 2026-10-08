@@ -259,6 +259,46 @@ def test_indexed_te_backend_checks_its_own_callable(monkeypatch: pytest.MonkeyPa
     assert model.model.layers[3].self_attn.backend == "te_indexed_sdpa"
 
 
+def test_triton_te_backend_requires_pinned_api_and_selects_mcore_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = QwenAirModelProvider.from_hf_config(_tiny_text_config(), qsa_backend="te_triton")
+
+    def qsa_triton(
+        query,
+        key,
+        value,
+        selected_key_blocks,
+        *,
+        scale=None,
+        validate_indices=True,
+    ):
+        return query
+
+    monkeypatch.setattr(qwenair_provider.importlib, "import_module", lambda _name: SimpleNamespace())
+    with pytest.raises(ImportError, match="TransformerEngine@3250741db1e06acd638da6124bc193405565f771"):
+        provider.provide()
+
+    def qsa_without_validation(query, key, value, selected_key_blocks, *, scale=None):
+        return query
+
+    monkeypatch.setattr(
+        qwenair_provider.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(qsa_triton_attention=qsa_without_validation),
+    )
+    with pytest.raises(ImportError, match="TransformerEngine@3250741db1e06acd638da6124bc193405565f771"):
+        provider.provide()
+
+    monkeypatch.setattr(
+        qwenair_provider.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(qsa_triton_attention=qsa_triton),
+    )
+    model = provider.provide()
+    assert model.model.layers[3].self_attn.backend == "te_triton"
+
+
 def test_qwenair_loss_preserves_scaled_backward_and_reports_components() -> None:
     scaled = torch.tensor(3.5, requires_grad=True)
     loss, num_tokens, metrics = qwenair_loss(

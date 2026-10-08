@@ -24,7 +24,7 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.model.tensor_model_parallel_size == 1
     assert cfg.model.pipeline_model_parallel_size == 1
     assert cfg.model.context_parallel_size == 1
-    assert cfg.model.qsa_backend == "te_indexed_sdpa"
+    assert cfg.model.qsa_backend == "te_triton"
     assert cfg.model.mtp_num_layers == 0
     assert cfg.model.calculate_per_token_loss is True
     assert cfg.train.global_batch_size == 8

@@ -118,7 +118,7 @@ def _base_recipe(
     text["max_single_rank_parameters"] = max(1, estimate.routed_expert_parameters_per_rank)
 
     cfg = _pretrain_common()
-    cfg.model = QwenAirModelProvider.from_hf_config(text, qsa_backend="te_indexed_sdpa")
+    cfg.model = QwenAirModelProvider.from_hf_config(text, qsa_backend="te_triton")
     cfg.model.tensor_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_layout = None

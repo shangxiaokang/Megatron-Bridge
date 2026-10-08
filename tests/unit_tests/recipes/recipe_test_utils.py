@@ -110,10 +110,14 @@ def recipe_factory_id(factory: Callable[..., object]) -> str:
 
 def exported_recipe_factory_keys(module: ModuleType) -> set[tuple[str, str]]:
     """Return identities of public ``*_config`` callables exported by a module."""
+    exported_names = getattr(module, "__all__", None)
+    if exported_names is None:
+        exported_names = vars(module)
+
     return {
         recipe_factory_key(value)
-        for name, value in vars(module).items()
-        if not name.startswith("_") and name.endswith("_config") and callable(value)
+        for name in exported_names
+        if not name.startswith("_") and name.endswith("_config") and callable(value := getattr(module, name, None))
     }
 
 

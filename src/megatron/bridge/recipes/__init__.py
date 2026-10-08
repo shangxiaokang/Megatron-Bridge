@@ -18,14 +18,14 @@ Megatron Bridge Recipe Configurations
 This module exposes all recipe configurations from all model families.
 """
 
+from importlib import import_module as _import_module
+
 from megatron.bridge.recipes.bagel import *
 from megatron.bridge.recipes.bagel.h100 import *
 from megatron.bridge.recipes.deepseek import *
 from megatron.bridge.recipes.deepseek.h100 import *
 from megatron.bridge.recipes.exaone import *
 from megatron.bridge.recipes.exaone.h100 import *
-from megatron.bridge.recipes.flux import *
-from megatron.bridge.recipes.flux.h100 import *
 from megatron.bridge.recipes.gemma import *
 from megatron.bridge.recipes.gemma.h100 import *
 from megatron.bridge.recipes.gemma3_vl import *
@@ -70,7 +70,55 @@ from megatron.bridge.recipes.qwen_omni import *
 from megatron.bridge.recipes.qwen_omni.h100 import *
 from megatron.bridge.recipes.qwen_vl import *
 from megatron.bridge.recipes.qwen_vl.h100 import *
+from megatron.bridge.recipes.qwenair import *
 from megatron.bridge.recipes.stepfun import *
 from megatron.bridge.recipes.stepfun.h100 import *
-from megatron.bridge.recipes.wan import *
-from megatron.bridge.recipes.wan.h100 import *
+
+
+_LAZY_RECIPE_MODULES = {
+    "flux": "megatron.bridge.recipes.flux",
+    "wan": "megatron.bridge.recipes.wan",
+}
+
+_LAZY_RECIPE_EXPORTS = {
+    "flux_12b_pretrain_config": "megatron.bridge.recipes.flux",
+    "flux_12b_sft_config": "megatron.bridge.recipes.flux",
+    "flux_12b_pretrain_2gpu_h100_bf16_config": "megatron.bridge.recipes.flux.h100",
+    "flux_12b_sft_2gpu_h100_bf16_config": "megatron.bridge.recipes.flux.h100",
+    "wan_14b_pretrain_config": "megatron.bridge.recipes.wan",
+    "wan_14b_sft_config": "megatron.bridge.recipes.wan",
+    "wan_1_3b_pretrain_config": "megatron.bridge.recipes.wan",
+    "wan_1_3b_sft_config": "megatron.bridge.recipes.wan",
+    "wan_1_3b_text2image_pretrain_config": "megatron.bridge.recipes.wan",
+    "wan_1_3b_text2video_pretrain_config": "megatron.bridge.recipes.wan",
+    "wan_14b_pretrain_8gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+    "wan_14b_sft_8gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+    "wan_1_3b_pretrain_8gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+    "wan_1_3b_sft_8gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+    "wan_1_3b_text2image_pretrain_1gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+    "wan_1_3b_text2video_pretrain_4gpu_h100_bf16_config": "megatron.bridge.recipes.wan.h100",
+}
+
+
+def __getattr__(name: str) -> object:
+    """Load diffusion recipe exports only when callers request them."""
+    module_name = _LAZY_RECIPE_EXPORTS.get(name) or _LAZY_RECIPE_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module = _import_module(module_name)
+    value = module if name in _LAZY_RECIPE_MODULES else getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    """Include deferred diffusion recipes in module introspection."""
+    return sorted({*globals(), *_LAZY_RECIPE_MODULES, *_LAZY_RECIPE_EXPORTS})
+
+
+__all__ = [
+    *(name for name in globals() if not name.startswith("_")),
+    *_LAZY_RECIPE_MODULES,
+    *_LAZY_RECIPE_EXPORTS,
+]

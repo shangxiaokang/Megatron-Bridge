@@ -56,6 +56,20 @@ def test_target_recipe_reads_nested_config_and_sizes_allocation_guards(tmp_path)
     assert cfg.tokenizer.vocab_size == text["vocab_size"]
 
 
+def test_target_recipe_has_an_offline_default() -> None:
+    cfg = qwenair_text_pretrain_32gpu_b300_bf16_config()
+
+    assert cfg.model.expert_model_parallel_size == 32
+    assert cfg.train.global_batch_size == 32
+    assert cfg.model.num_layers == 48
+    assert cfg.model.num_moe_experts == 512
+    assert cfg.model.hidden_size == 2560
+    assert cfg.model.seq_length == 4096
+    assert cfg.model.qwenair_text_config["model_type"] == "qwen4_exp_text"
+    assert cfg.model.qwenair_text_config["dtype"] == "bfloat16"
+    assert cfg.dataset.seq_length == 4096
+
+
 def test_target_recipe_rejects_the_multimodal_wrapper_as_text_config(tmp_path) -> None:
     path = tmp_path / "config.json"
     path.write_text(json.dumps({"model_type": "qwen4_exp"}), encoding="utf-8")

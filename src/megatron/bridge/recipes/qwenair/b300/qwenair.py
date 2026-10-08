@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -78,6 +79,19 @@ def _tiny_text_config() -> dict[str, Any]:
             "mrope_section": [1, 1, 0],
         },
     }
+
+
+def _target_text_config() -> dict[str, Any]:
+    """Return the built-in 32-B300 target text geometry in HF form."""
+    text = asdict(QwenAirTextConfig())
+    text["model_type"] = "qwen4_exp_text"
+    text["dtype"] = "bfloat16"
+    text["rope_parameters"] = {
+        "rope_theta": text.pop("rope_theta"),
+        "partial_rotary_factor": text.pop("partial_rotary_factor"),
+        "mrope_section": list(text.pop("mrope_section")),
+    }
+    return text
 
 
 def _read_target_text_config(config_path: str | Path) -> dict[str, Any]:
@@ -178,18 +192,22 @@ def qwenair_tiny_pretrain_8gpu_b300_bf16_config() -> ConfigContainer:
 
 
 def qwenair_text_pretrain_32gpu_b300_bf16_config(
-    config_path: str | Path,
+    config_path: str | Path | None = None,
     *,
     seq_length: int = 4096,
 ) -> ConfigContainer:
     """Return a 32-B300 EP32 target-text bring-up recipe.
 
-    The recipe reads the supplied, pinned QwenAir JSON and deliberately disables
-    the undefined MTP objective. It is a short-context LM bring-up configuration;
-    262K context requires the unfinished CP and native sparse-attention work.
+    With ``config_path``, the recipe reads the supplied, pinned QwenAir JSON and
+    otherwise uses the built-in target text geometry. Both variants deliberately
+    disable the undefined MTP objective. This is a short-context LM bring-up
+    configuration; 262K context requires the unfinished CP and native
+    sparse-attention work.
     """
+    text_config = _target_text_config() if config_path is None else _read_target_text_config(config_path)
+
     return _base_recipe(
-        _read_target_text_config(config_path),
+        text_config,
         world_size=32,
         expert_model_parallel_size=32,
         seq_length=seq_length,

@@ -133,6 +133,7 @@ def test_auto_bridge_dispatch_preserves_text_geometry() -> None:
 def test_small_model_has_complete_identity_mapping_and_roundtrips() -> None:
     config = _tiny_text_config()
     provider = QwenAirModelProvider.from_hf_config(config)
+    assert provider.mrope_section == [1, 1, 0]
     model = provider.provide()
     bridge = QwenAirTextBridge()
     registry = bridge.mapping_registry()
@@ -143,6 +144,8 @@ def test_small_model_has_complete_identity_mapping_and_roundtrips() -> None:
     assert model.config.num_layers == provider.num_layers
     assert model.config.params_dtype == provider.params_dtype
     assert model.config.calculate_per_token_loss == provider.calculate_per_token_loss
+    assert model.config.mrope_section == [1, 1, 0]
+    assert model.config.mrope_interleaved is True
     assert model.model.layers[3].self_attn.backend == "dense"
     assert [layer.layer_type for layer in model.model.layers] == [
         "linear_attention",

@@ -192,6 +192,8 @@ class QwenAirModelProvider(GPTModelProvider):
             position_embedding_type="rope",
             rotary_base=int(config.rope_theta),
             rotary_percent=config.partial_rotary_factor,
+            mrope_section=list(config.mrope_section),
+            mrope_interleaved=True,
             add_bias_linear=False,
             add_qkv_bias=config.attention_bias,
             attention_dropout=config.attention_dropout,

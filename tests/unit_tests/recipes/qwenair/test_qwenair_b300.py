@@ -3,11 +3,13 @@
 """QwenAir B300 recipe contracts."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import torch
+from megatron.core.models.qwenair import QwenAirTextConfig, estimate_qwenair_training_memory
 
-from megatron.bridge.models.qwenair import QwenAirModelProvider
+from megatron.bridge.models.qwenair import QwenAirModelProvider, qwenair_provider
 from megatron.bridge.recipes.qwenair.b300.qwenair import (
     _tiny_text_config,
     qwenair_text_pretrain_32gpu_b300_bf16_config,
@@ -25,6 +27,7 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.model.pipeline_model_parallel_size == 1
     assert cfg.model.context_parallel_size == 1
     assert cfg.model.qsa_backend == "te_triton"
+    assert cfg.model.qwenair_text_config["indexer_compress_ratio"] == 4
     assert cfg.model.mtp_num_layers == 0
     assert cfg.model.calculate_per_token_loss is True
     assert cfg.train.global_batch_size == 8
@@ -35,6 +38,36 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.ddp.average_in_collective is False
     assert cfg.mixed_precision.bf16 is True
     assert cfg.optimizer.main_params_dtype == torch.float32
+
+
+def test_tiny_recipe_config_constructs_te_triton_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = qwenair_tiny_pretrain_8gpu_b300_bf16_config()
+
+    def qsa_triton(
+        query,
+        key,
+        value,
+        selected_key_blocks,
+        *,
+        scale=None,
+        validate_indices=True,
+    ):
+        return query
+
+    monkeypatch.setattr(
+        qwenair_provider.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(qsa_triton_attention=qsa_triton),
+    )
+    provider = QwenAirModelProvider.from_hf_config(
+        cfg.model.qwenair_text_config,
+        qsa_backend=cfg.model.qsa_backend,
+    )
+
+    model = provider.provide()
+
+    assert model.config.indexer_compress_ratio == 4
+    assert model.model.layers[3].self_attn.backend == "te_triton"
 
 
 def test_target_recipe_reads_nested_config_and_sizes_allocation_guards(tmp_path) -> None:
@@ -68,6 +101,10 @@ def test_target_recipe_has_an_offline_default() -> None:
     assert cfg.model.qwenair_text_config["model_type"] == "qwen4_exp_text"
     assert cfg.model.qwenair_text_config["dtype"] == "bfloat16"
     assert cfg.dataset.seq_length == 4096
+    planning_config = QwenAirTextConfig.from_hf_dict(cfg.model.qwenair_text_config)
+    estimate = estimate_qwenair_training_memory(planning_config, world_size=32)
+    assert cfg.model.qwenair_text_config["max_single_rank_ple_elements"] == estimate.ple_parameters_per_rank
+    assert cfg.model.qwenair_text_config["max_single_rank_parameters"] == estimate.routed_expert_parameters_per_rank
 
 
 def test_target_recipe_rejects_the_multimodal_wrapper_as_text_config(tmp_path) -> None:

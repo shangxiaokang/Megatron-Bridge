@@ -24,6 +24,7 @@ from typing import Any, Mapping
 
 import torch
 from megatron.core.models.qwenair import QwenAirTextConfig, estimate_qwenair_training_memory
+from megatron.core.models.qwenair.ple import qwenair_ngram_metadata
 
 from megatron.bridge.models.qwenair import QwenAirModelProvider
 from megatron.bridge.recipes.common import _pretrain_common
@@ -71,7 +72,7 @@ def _tiny_text_config() -> dict[str, Any]:
         "indexer_kv_heads": 1,
         "indexer_head_dim": 8,
         "indexer_budget": 8,
-        "indexer_compress_ratio": 2,
+        "indexer_compress_ratio": 4,
         "max_reference_sequence_length": 128,
         "rope_parameters": {
             "rope_theta": 10000,
@@ -125,6 +126,24 @@ def _base_recipe(
     text = deepcopy(dict(text_config))
     text["expert_model_parallel_size"] = expert_model_parallel_size
     planning_config = QwenAirTextConfig.from_hf_dict(text)
+
+    # The estimator validates the same per-rank allocation guards as model
+    # construction. Size those guards from the requested geometry before asking
+    # it for the complete model/optimizer estimate.
+    head_width = planning_config.ple_embed_dim // ((planning_config.ngram_size - 1) * planning_config.heads_per_ngram)
+    ple_elements_per_rank = sum(
+        qwenair_ngram_metadata(planning_config, ple_index)[3] // expert_model_parallel_size * head_width
+        for ple_index in range(len(planning_config.ple_layer_ids))
+    )
+    routed_expert_parameters_per_rank = (
+        planning_config.num_hidden_layers
+        * (planning_config.num_experts // expert_model_parallel_size)
+        * 3
+        * planning_config.moe_intermediate_size
+        * planning_config.hidden_size
+    )
+    planning_config.max_single_rank_ple_elements = max(1, ple_elements_per_rank)
+    planning_config.max_single_rank_parameters = max(1, routed_expert_parameters_per_rank)
     estimate = estimate_qwenair_training_memory(planning_config, world_size)
     # These are explicit allocation guards. Set them to the planned local
     # shards, rather than disabling the model's fail-closed resource checks.

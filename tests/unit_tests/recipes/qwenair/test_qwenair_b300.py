@@ -103,10 +103,10 @@ def test_target_recipe_has_an_offline_default() -> None:
     assert cfg.model.num_layers == 48
     assert cfg.model.num_moe_experts == 512
     assert cfg.model.hidden_size == 2560
-    assert cfg.model.seq_length == 4096
+    assert cfg.model.seq_length == 64
     assert cfg.model.qwenair_text_config["model_type"] == "qwen4_exp_text"
     assert cfg.model.qwenair_text_config["dtype"] == "bfloat16"
-    assert cfg.dataset.seq_length == 4096
+    assert cfg.dataset.seq_length == 64
     assert cfg.ddp.bucket_size == 40_000_000
     assert cfg.logger.log_interval == 1
     planning_config = QwenAirTextConfig.from_hf_dict(cfg.model.qwenair_text_config)

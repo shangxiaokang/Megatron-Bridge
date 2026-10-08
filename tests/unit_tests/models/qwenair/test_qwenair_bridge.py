@@ -101,6 +101,11 @@ def test_canonical_text_provider_preserves_48_layer_schedule() -> None:
     assert provider.num_layers == 48
     assert provider.num_attention_heads == 24
     assert provider.kv_channels == 256
+    assert provider.linear_conv_kernel_dim == 4
+    assert provider.linear_key_head_dim == 128
+    assert provider.linear_value_head_dim == 128
+    assert provider.linear_num_key_heads == 16
+    assert provider.linear_num_value_heads == 48
     assert provider.share_embeddings_and_output_weights is False
     assert provider.mtp_num_layers == 0
     assert provider.qwenair_text_config["layer_types"].count("full_attention") == 12
@@ -146,6 +151,11 @@ def test_small_model_has_complete_identity_mapping_and_roundtrips() -> None:
     assert model.config.calculate_per_token_loss == provider.calculate_per_token_loss
     assert model.config.mrope_section == [1, 1, 0]
     assert model.config.mrope_interleaved is True
+    assert model.config.linear_conv_kernel_dim == config["linear_conv_kernel_dim"]
+    assert model.config.linear_key_head_dim == config["linear_key_head_dim"]
+    assert model.config.linear_value_head_dim == config["linear_value_head_dim"]
+    assert model.config.linear_num_key_heads == config["linear_num_key_heads"]
+    assert model.config.linear_num_value_heads == config["linear_num_value_heads"]
     assert model.model.layers[3].self_attn.backend == "dense"
     assert [layer.layer_type for layer in model.model.layers] == [
         "linear_attention",

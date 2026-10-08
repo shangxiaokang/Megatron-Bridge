@@ -220,14 +220,15 @@ def qwenair_tiny_pretrain_8gpu_b300_bf16_config() -> ConfigContainer:
 def qwenair_text_pretrain_32gpu_b300_bf16_config(
     config_path: str | Path | None = None,
     *,
-    seq_length: int = 4096,
+    seq_length: int = 64,
 ) -> ConfigContainer:
     """Return a 32-B300 EP32 target-text bring-up recipe.
 
     With ``config_path``, the recipe reads the supplied, pinned QwenAir JSON and
     otherwise uses the built-in target text geometry. Both variants deliberately
-    disable the undefined MTP objective. This is a short-context LM bring-up
-    configuration; 262K context requires the unfinished CP and native
+    disable the undefined MTP objective. The conservative default is 64 tokens
+    because the reference GDN recurrence retains an FP32 state for every token;
+    262K context requires the unfinished chunked GDN, CP, and native
     sparse-attention work.
     """
     text_config = _target_text_config() if config_path is None else _read_target_text_config(config_path)

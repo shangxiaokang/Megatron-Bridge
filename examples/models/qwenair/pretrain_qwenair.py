@@ -44,7 +44,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Use the 32-GPU target-text recipe with this QwenAir config JSON",
     )
-    parser.add_argument("--seq-length", type=int, default=4096)
+    parser.add_argument(
+        "--seq-length",
+        type=int,
+        default=64,
+        help="Target-recipe sequence length (64-token conservative bring-up default)",
+    )
     parser.add_argument("--train-iters", type=int)
     parser.add_argument("--checkpoint-dir", type=Path)
     return parser.parse_args()

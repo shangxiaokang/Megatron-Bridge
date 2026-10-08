@@ -36,6 +36,8 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.tokenizer.null_tokenizer_eod_id == _tiny_text_config()["eos_token_id"]
     assert cfg.ddp.use_distributed_optimizer is True
     assert cfg.ddp.average_in_collective is False
+    assert cfg.ddp.bucket_size == 40_000_000
+    assert cfg.logger.log_interval == 1
     assert cfg.mixed_precision.bf16 is True
     assert cfg.optimizer.main_params_dtype == torch.float32
 
@@ -105,6 +107,8 @@ def test_target_recipe_has_an_offline_default() -> None:
     assert cfg.model.qwenair_text_config["model_type"] == "qwen4_exp_text"
     assert cfg.model.qwenair_text_config["dtype"] == "bfloat16"
     assert cfg.dataset.seq_length == 4096
+    assert cfg.ddp.bucket_size == 40_000_000
+    assert cfg.logger.log_interval == 1
     planning_config = QwenAirTextConfig.from_hf_dict(cfg.model.qwenair_text_config)
     estimate = estimate_qwenair_training_memory(planning_config, world_size=32)
     assert cfg.model.qwenair_text_config["max_single_rank_ple_elements"] == estimate.ple_parameters_per_rank

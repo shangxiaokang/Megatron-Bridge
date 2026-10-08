@@ -33,6 +33,9 @@ from megatron.bridge.training.config import ConfigContainer
 from megatron.bridge.training.mixed_precision import bf16_mixed
 
 
+_QWENAIR_DDP_BUCKET_SIZE = 40_000_000
+
+
 def _tiny_text_config() -> dict[str, Any]:
     return {
         "model_type": "qwen4_exp_text",
@@ -194,7 +197,11 @@ def _base_recipe(
     cfg.ddp.grad_reduce_in_fp32 = True
     cfg.ddp.overlap_grad_reduce = False
     cfg.ddp.overlap_param_gather = False
+    # Keep synchronous collectives below the NCCL element-count boundary for
+    # the target expert/PLE buffer. Individual parameters remain indivisible.
+    cfg.ddp.bucket_size = _QWENAIR_DDP_BUCKET_SIZE
     cfg.checkpoint.save_interval = max(1, train_iters)
+    cfg.logger.log_interval = 1
     cfg.env_vars = {**COMMON_RECIPE_ENV_VARS}
     return cfg
 

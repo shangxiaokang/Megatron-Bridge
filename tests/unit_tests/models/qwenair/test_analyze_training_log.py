@@ -14,7 +14,7 @@
 
 """QwenAir bounded-training log analysis contracts."""
 
-from examples.models.qwenair.analyze_training_log import _parse_metrics, _summarize
+from examples.models.qwenair.analyze_training_log import _parse_metrics, _summarize, parse_args
 
 
 def _metrics(steps: int, global_batch_size: int) -> list[dict[str, int | float]]:
@@ -43,6 +43,56 @@ def test_summary_uses_explicit_warmup_and_global_batch_size() -> None:
     assert summary["consumed_sample_mismatch_steps"] == []
     assert summary["final_consumed_samples"] == 20 * 128
     assert summary["post_warmup_ols_slope_per_step"] < 0
+    assert summary["verdict"] == "PASS"
+    assert summary["verdict_scope"] == "numerical_health_and_loss_trend_only"
+    assert summary["min_relative_drop"] == 0.02
+    assert summary["max_final_loss"] is None
+    assert summary["final_loss_target_met"] is None
+
+
+def test_summary_uses_configurable_minimum_relative_drop() -> None:
+    metrics = _metrics(20, 128)
+
+    summary = _summarize(metrics, 20, warmup_steps=2, global_batch_size=128, min_relative_drop=0.05)
+
+    assert summary["relative_mean_drop"] < summary["min_relative_drop"]
+    assert summary["loss_trend_criteria_met"] is False
+    assert summary["verdict"] == "WARN"
+
+
+def test_summary_can_require_an_absolute_final_loss_target() -> None:
+    metrics = _metrics(20, 128)
+
+    passing = _summarize(metrics, 20, warmup_steps=2, global_batch_size=128, max_final_loss=9.0)
+    missing = _summarize(metrics, 20, warmup_steps=2, global_batch_size=128, max_final_loss=8.99)
+
+    assert passing["verdict_scope"] == "numerical_health_and_loss_trend_plus_final_loss_target"
+    assert passing["final_loss_target_met"] is True
+    assert passing["verdict"] == "PASS"
+    assert missing["final_loss_target_met"] is False
+    assert missing["verdict"] == "FAIL"
+
+
+def test_parse_args_accepts_custom_verdict_thresholds(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "analyze_training_log.py",
+            "--log",
+            "train.log",
+            "--output-dir",
+            "analysis",
+            "--min-relative-drop",
+            "0.15",
+            "--max-final-loss",
+            "8.5",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.min_relative_drop == 0.15
+    assert args.max_final_loss == 8.5
 
 
 def test_summary_fails_a_per_step_sample_count_mismatch() -> None:

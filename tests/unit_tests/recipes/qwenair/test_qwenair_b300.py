@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from examples.models.qwenair.finetune_qwenair_multimodal import _apply_run_overrides, _configure_run_outputs
 from megatron.core.models.qwenair import QwenAirTextConfig, estimate_qwenair_training_memory
 
 from megatron.bridge.models.qwenair import QwenAirModelProvider, QwenAirMultimodalModelProvider, qwenair_provider
@@ -30,6 +31,7 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.model.context_parallel_size == 1
     assert cfg.model.qsa_backend == "te_triton"
     assert cfg.model.qwenair_text_config["indexer_compress_ratio"] == 4
+    assert cfg.model.qwenair_text_config["indexer_budget"] == 128
     assert cfg.model.mtp_num_layers == 0
     assert cfg.model.calculate_per_token_loss is True
     assert cfg.train.global_batch_size == 8
@@ -68,6 +70,88 @@ def test_tiny_multimodal_recipe_uses_real_shuffled_flickr8k_contract() -> None:
     assert cfg.train.train_iters == 128
     assert cfg.train.global_batch_size == 128
     assert cfg.scheduler.lr_warmup_iters == 12
+    assert cfg.scheduler.lr_decay_style == "constant"
+    assert cfg.optimizer.lr == 1.0e-3
+    assert cfg.optimizer.min_lr == 1.0e-3
+
+
+def _multimodal_override_args(**overrides) -> SimpleNamespace:
+    values = {
+        "dataset_split": "train",
+        "indexer_budget": None,
+        "allow_untrained_sparse_indexer": False,
+        "lr_decay_style": None,
+        "min_lr": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_multimodal_cli_cosine_override_restores_a_real_decay_range() -> None:
+    cfg = qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+        dataset_revision="dataset-commit",
+        processor_revision="processor-commit",
+    )
+
+    _apply_run_overrides(cfg, _multimodal_override_args(lr_decay_style="cosine"))
+
+    assert cfg.scheduler.lr_decay_style == "cosine"
+    assert cfg.optimizer.lr == 1.0e-3
+    assert cfg.optimizer.min_lr == 1.0e-4
+
+
+def test_multimodal_cli_rejects_a_decaying_min_lr_with_constant_style() -> None:
+    cfg = qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+        dataset_revision="dataset-commit",
+        processor_revision="processor-commit",
+    )
+
+    with pytest.raises(ValueError, match="constant learning rate"):
+        _apply_run_overrides(cfg, _multimodal_override_args(min_lr=1.0e-4))
+
+
+def test_multimodal_cli_requires_explicit_opt_in_for_an_untrained_sparse_indexer() -> None:
+    cfg = qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+        dataset_revision="dataset-commit",
+        processor_revision="processor-commit",
+    )
+
+    with pytest.raises(ValueError, match="allow-untrained-sparse-indexer"):
+        _apply_run_overrides(cfg, _multimodal_override_args(indexer_budget=8))
+
+    _apply_run_overrides(
+        cfg,
+        _multimodal_override_args(indexer_budget=8, allow_untrained_sparse_indexer=True),
+    )
+    assert cfg.model.qwenair_text_config["indexer_budget"] == 8
+
+
+def test_multimodal_cli_disables_implicit_persistent_outputs(tmp_path) -> None:
+    cfg = qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+        dataset_revision="dataset-commit",
+        processor_revision="processor-commit",
+    )
+    assert cfg.checkpoint.save is not None
+    assert cfg.logger.tensorboard_dir is not None
+
+    _configure_run_outputs(cfg, checkpoint_dir=None, tensorboard_dir=None)
+
+    assert cfg.checkpoint.save is None
+    assert cfg.checkpoint.load is None
+    assert cfg.checkpoint.save_interval == 0
+    assert cfg.logger.tensorboard_dir is None
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    tensorboard_dir = tmp_path / "tensorboard"
+    _configure_run_outputs(
+        cfg,
+        checkpoint_dir=checkpoint_dir,
+        tensorboard_dir=tensorboard_dir,
+    )
+    assert cfg.checkpoint.save == str(checkpoint_dir)
+    assert cfg.checkpoint.load == str(checkpoint_dir)
+    assert cfg.checkpoint.save_interval == cfg.train.train_iters
+    assert cfg.logger.tensorboard_dir == str(tensorboard_dir)
 
 
 def test_tiny_real_data_recipe_uses_indexed_data_and_bounded_schedule(tmp_path) -> None:

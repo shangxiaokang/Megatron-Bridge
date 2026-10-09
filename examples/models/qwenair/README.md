@@ -66,9 +66,9 @@ uv run python examples/models/qwenair/analyze_training_log.py \
   --global-batch-size 8
 ```
 
-The analyzer requires all 100 steps, finite metrics, and zero skipped/NaN iterations. It compares steps 11–20 with 91–100 and fits a post-warmup linear trend. A `PASS` requires at least a 2% mean loss reduction, a negative slope, and at least seven of the final ten points below the early-window median.
+The analyzer requires all 100 steps, finite metrics, and zero skipped/NaN iterations. It compares steps 11–20 with 91–100 and fits a post-warmup linear trend. By default, `PASS` means only that these numerical-health and downward-trend checks succeeded: at least a 2% mean loss reduction, a negative slope, and at least seven of the final ten points below the early-window median. Use `--max-final-loss` when a workload has a separately justified absolute acceptance target.
 
-## Real multimodal convergence run
+## Real multimodal pipeline-learning run
 
 `finetune_qwenair_multimodal.py` trains the native Transformer Engine vision encoder and the QwenAir language model together. The reproducible recipe pins:
 
@@ -89,7 +89,17 @@ uv run python -m torch.distributed.run --standalone --nproc-per-node=8 \
   --tensorboard-dir /shared/logs/qwenair-flickr8k-128/tensorboard
 ```
 
-The bounded recipe uses BF16, EP4 x EDP2, micro batch size 1, sequence length 128, 12 warmup steps, and cosine decay. It preserves the QwenAir token, PLE, HC, MoE, QSA, and multimodal scatter contracts while reducing the text and vision widths for an integration test. The unavailable QSA indexer objective and MTP training contract remain disabled, so this run validates end-to-end image-text causal-language training rather than the complete target pretraining objective.
+The bounded recipe uses BF16, EP4 x EDP2, micro batch size 1, sequence length 128, 12 warmup steps, and a constant `1e-3` learning rate after warmup. Its QSA token budget is 128, which is dense-equivalent at this sequence length and prevents the unavailable hard-top-k indexer objective from leaving a random sparse selector in the language-model path. It preserves the QwenAir token, PLE, HC, MoE, QSA-kernel, and multimodal scatter contracts while reducing the text and vision widths for an integration test. MTP and sparse-indexer training remain outside this run, so its absolute loss must not be compared with a full Qwen3.5/QwenAir pretraining curve.
+
+For a deterministic pipeline-learning diagnostic, repeat one Flickr8k image and its five captions. This is an intentional overfit test, not a generalization measurement:
+
+```bash
+uv run python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  examples/models/qwenair/finetune_qwenair_multimodal.py \
+  --dataset-split 'train[:1]' \
+  --train-iters 128 \
+  --global-batch-size 128
+```
 
 Analyze the run with its exact schedule and batch contract:
 
@@ -103,4 +113,4 @@ uv run python examples/models/qwenair/analyze_training_log.py \
   --require-pass
 ```
 
-The analyzer also checks every step's consumed-sample count. A `PASS` requires exactly 128 finite steps, zero skipped/NaN iterations, a negative post-warmup slope, at least a 2% late-window mean loss reduction, and at least seven of the final ten losses below the early-window median.
+The analyzer also checks every step's consumed-sample count. Add a workload-specific target such as `--max-final-loss <value>` before using `--require-pass` as an absolute convergence gate; without it, `PASS` reports numerical health and a downward trend only.

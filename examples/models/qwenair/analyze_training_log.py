@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Extract QwenAir training metrics and assess a bounded loss curve."""
+"""Extract QwenAir training metrics and assess numerical health and loss trend."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ from pathlib import Path
 
 
 _LOGGER = logging.getLogger(__name__)
+_DEFAULT_MIN_RELATIVE_DROP = 0.02
+_TREND_ONLY_VERDICT_SCOPE = "numerical_health_and_loss_trend_only"
+_TARGETED_VERDICT_SCOPE = "numerical_health_and_loss_trend_plus_final_loss_target"
 _NUMBER = r"[-+]?(?:nan|inf|(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)"
 _ITERATION_PATTERN = re.compile(
     rf"iteration\s+(?P<step>\d+)/\s*(?P<total>\d+).*?"
@@ -43,14 +46,37 @@ _ITERATION_PATTERN = re.compile(
 
 def parse_args() -> argparse.Namespace:
     """Parse log-analysis options."""
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description=(
+            "Assess QwenAir training-log numerical health and loss trend. PASS covers only those checks unless "
+            "--max-final-loss adds an absolute final-loss target."
+        )
+    )
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-steps", type=int, default=100)
     parser.add_argument("--warmup-steps", type=int, default=10)
     parser.add_argument("--global-batch-size", type=int)
+    parser.add_argument(
+        "--min-relative-drop",
+        type=float,
+        default=_DEFAULT_MIN_RELATIVE_DROP,
+        help="Minimum early-to-late relative mean loss drop required for PASS (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--max-final-loss",
+        type=float,
+        help="Optional maximum final loss required for PASS.",
+    )
     parser.add_argument("--require-pass", action="store_true")
     return parser.parse_args()
+
+
+def _validate_verdict_thresholds(min_relative_drop: float, max_final_loss: float | None) -> None:
+    if not math.isfinite(min_relative_drop) or min_relative_drop < 0:
+        raise ValueError("min-relative-drop must be finite and non-negative")
+    if max_final_loss is not None and not math.isfinite(max_final_loss):
+        raise ValueError("max-final-loss must be finite when set")
 
 
 def _parse_metrics(log_path: Path) -> list[dict[str, int | float]]:
@@ -95,7 +121,10 @@ def _summarize(
     *,
     warmup_steps: int,
     global_batch_size: int | None,
+    min_relative_drop: float = _DEFAULT_MIN_RELATIVE_DROP,
+    max_final_loss: float | None = None,
 ) -> dict[str, object]:
+    _validate_verdict_thresholds(min_relative_drop, max_final_loss)
     expected = set(range(1, expected_steps + 1))
     observed = {int(point["step"]) for point in metrics}
     missing_steps = sorted(expected - observed)
@@ -141,19 +170,28 @@ def _summarize(
         and nan_iterations == 0
         and not consumed_sample_mismatch_steps
     )
+    losses = [float(point["lm_loss"]) for point in metrics]
+    last_loss = losses[-1] if losses else math.nan
+    loss_trend_criteria_met = relative_drop >= min_relative_drop and slope < 0 and late_below_early_median >= 7
+    final_loss_target_met = (
+        None if max_final_loss is None else math.isfinite(last_loss) and last_loss <= max_final_loss
+    )
+    verdict_scope = _TREND_ONLY_VERDICT_SCOPE if max_final_loss is None else _TARGETED_VERDICT_SCOPE
 
     if not healthy or not math.isfinite(slope) or late_mean >= early_mean:
         verdict = "FAIL"
-    elif relative_drop >= 0.02 and slope < 0 and late_below_early_median >= 7:
+    elif final_loss_target_met is False:
+        verdict = "FAIL"
+    elif loss_trend_criteria_met:
         verdict = "PASS"
     elif slope < 0:
         verdict = "WARN"
     else:
         verdict = "FAIL"
 
-    losses = [float(point["lm_loss"]) for point in metrics]
     return {
         "verdict": verdict,
+        "verdict_scope": verdict_scope,
         "expected_steps": expected_steps,
         "observed_steps": len(metrics),
         "missing_steps": missing_steps,
@@ -165,7 +203,7 @@ def _summarize(
         "consumed_sample_mismatch_steps": consumed_sample_mismatch_steps,
         "final_consumed_samples": int(metrics[-1]["consumed_samples"]) if metrics else 0,
         "first_loss": losses[0] if losses else math.nan,
-        "last_loss": losses[-1] if losses else math.nan,
+        "last_loss": last_loss,
         "minimum_loss": min(losses) if losses else math.nan,
         "early_window": [early_start, early_end],
         "late_window": [late_start, expected_steps],
@@ -173,6 +211,10 @@ def _summarize(
         "early_median": early_median,
         "late_mean": late_mean,
         "relative_mean_drop": relative_drop,
+        "min_relative_drop": min_relative_drop,
+        "loss_trend_criteria_met": loss_trend_criteria_met,
+        "max_final_loss": max_final_loss,
+        "final_loss_target_met": final_loss_target_met,
         "post_warmup_ols_slope_per_step": slope,
         "late_points_below_early_median": late_below_early_median,
     }
@@ -226,6 +268,7 @@ def main() -> None:
         raise ValueError("warmup-steps must be in [0, expected-steps)")
     if args.global_batch_size is not None and args.global_batch_size < 1:
         raise ValueError("global-batch-size must be positive when set")
+    _validate_verdict_thresholds(args.min_relative_drop, args.max_final_loss)
     if not args.log.is_file():
         raise FileNotFoundError(args.log)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -251,15 +294,17 @@ def main() -> None:
         args.expected_steps,
         warmup_steps=args.warmup_steps,
         global_batch_size=args.global_batch_size,
+        min_relative_drop=args.min_relative_drop,
+        max_final_loss=args.max_final_loss,
     )
     summary["plot_written"] = _write_plot(metrics, args.output_dir / "loss_curve.png") if metrics else False
     (args.output_dir / "loss_summary.json").write_text(
         json.dumps(_json_safe(summary), indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
-    _LOGGER.info("Convergence verdict: %s", summary["verdict"])
+    _LOGGER.info("Training-log verdict (%s): %s", summary["verdict_scope"], summary["verdict"])
     if args.require_pass and summary["verdict"] != "PASS":
-        raise SystemExit(f"Convergence verdict is {summary['verdict']}, expected PASS")
+        raise SystemExit(f"Training-log verdict is {summary['verdict']}, expected PASS")
 
 
 if __name__ == "__main__":

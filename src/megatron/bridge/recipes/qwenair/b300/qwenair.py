@@ -42,6 +42,79 @@ _QWENAIR_REAL_DATA_TRAIN_ITERS = 100
 _QWENAIR_IMAGE_TOKEN_ID = 248_056
 _QWENAIR_VIDEO_TOKEN_ID = 248_057
 _QWENAIR_VISION_START_TOKEN_ID = 248_053
+_QWENAIR_VISION_END_TOKEN_ID = 248_054
+_QWENAIR_TARGET_LAYER_TYPES = [
+    "linear_attention" if (layer_index + 1) % 4 else "full_attention" for layer_index in range(48)
+]
+_QWENAIR_TARGET_TEXT_VALUES = {
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": _QWENAIR_EOD_ID,
+    "dtype": "bfloat16",
+    "eos_token_id": _QWENAIR_EOD_ID,
+    "full_attention_interval": 4,
+    "hc_count": 4,
+    "hc_lowrank": 320,
+    "head_dim": 256,
+    "heads_per_ngram": 8,
+    "hidden_act": "silu",
+    "hidden_size": 2560,
+    "indexer_budget": 2048,
+    "indexer_compress_ratio": 4,
+    "indexer_head_dim": 128,
+    "indexer_kv_heads": 1,
+    "indexer_n_heads": 4,
+    "initializer_range": 0.02,
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 128,
+    "linear_num_key_heads": 16,
+    "linear_num_value_heads": 48,
+    "linear_value_head_dim": 128,
+    "make_ngram_vocab_size_divisible_by": 128,
+    "mamba_ssm_dtype": "float32",
+    "max_position_embeddings": 262_144,
+    "model_type": "qwen4_exp_text",
+    "moe_intermediate_size": 640,
+    "mtp_num_hidden_layers": 1,
+    "mtp_use_dedicated_embeddings": False,
+    "ngram_size": 3,
+    "ngram_vocab_size_base": 20_000_000,
+    "num_attention_heads": 24,
+    "num_experts": 512,
+    "num_experts_per_tok": 10,
+    "num_hidden_layers": 48,
+    "num_key_value_heads": 2,
+    "output_gate_type": "sigmoid",
+    "output_router_logits": False,
+    "pad_token_id": None,
+    "partial_rotary_factor": 0.25,
+    "ple_conv_kernel_size": 4,
+    "ple_embed_dim": 2560,
+    "ple_layer_ids": [2],
+    "rms_norm_eps": 1.0e-6,
+    "router_aux_loss_coef": 0.001,
+    "shared_expert_intermediate_size": 640,
+    "split_ngram_parts": 128,
+    "tie_word_embeddings": False,
+    "use_cache": True,
+    "vocab_size": _QWENAIR_VOCAB_SIZE,
+}
+_QWENAIR_TARGET_VISION_VALUES = {
+    "deepstack_visual_indexes": [],
+    "depth": 27,
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 1152,
+    "in_channels": 3,
+    "initializer_range": 0.02,
+    "intermediate_size": 4304,
+    "model_type": "qwen4_exp",
+    "num_heads": 16,
+    "num_position_embeddings": 2304,
+    "out_hidden_size": 2560,
+    "patch_size": 16,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+}
 
 
 def _tiny_text_config() -> dict[str, Any]:
@@ -146,6 +219,86 @@ def _read_target_text_config(config_path: str | Path) -> dict[str, Any]:
     return text
 
 
+def _require_exact_values(config: Mapping[str, Any], expected: Mapping[str, Any], *, section: str) -> None:
+    """Reject a config whose canonical QwenAir contract has drifted."""
+    missing = sorted(expected.keys() - config.keys())
+    if missing:
+        raise ValueError(f"QwenAir {section} is missing canonical fields: {', '.join(missing)}")
+    mismatches = [name for name, value in expected.items() if config[name] != value]
+    if mismatches:
+        details = ", ".join(f"{name}={config[name]!r} (expected {expected[name]!r})" for name in mismatches)
+        raise ValueError(f"QwenAir {section} does not match the canonical target: {details}")
+
+
+def _read_target_multimodal_config(config_path: str | Path) -> dict[str, Any]:
+    """Read and validate the canonical full QwenAir multimodal JSON.
+
+    The target recipe deliberately fails closed instead of accepting the
+    language-only ``qwen3_8_flash_next`` alias or a scaled test geometry. This
+    keeps the 32-B300 run tied to the checked provenance configuration.
+    """
+    path = Path(config_path)
+    with path.open(encoding="utf-8") as config_file:
+        raw_payload = json.load(config_file)
+    if not isinstance(raw_payload, Mapping):
+        raise TypeError("QwenAir config JSON must contain an object")
+    payload = deepcopy(dict(raw_payload))
+    if payload.get("model_type") != "qwen4_exp":
+        raise ValueError("QwenAir target multimodal recipe requires model_type=qwen4_exp")
+    if payload.get("language_model_only") is not False:
+        raise ValueError("QwenAir target multimodal recipe requires language_model_only=false")
+    if payload.get("architectures") != ["Qwen4ExpForConditionalGeneration"]:
+        raise ValueError("QwenAir target multimodal recipe requires Qwen4ExpForConditionalGeneration")
+    if payload.get("tie_word_embeddings") is not False:
+        raise ValueError("QwenAir target multimodal recipe requires tie_word_embeddings=false")
+
+    text = payload.get("text_config")
+    vision = payload.get("vision_config")
+    if not isinstance(text, Mapping) or not isinstance(vision, Mapping):
+        raise TypeError("QwenAir target multimodal config requires text_config and vision_config objects")
+    _require_exact_values(text, _QWENAIR_TARGET_TEXT_VALUES, section="text_config")
+    _require_exact_values(vision, _QWENAIR_TARGET_VISION_VALUES, section="vision_config")
+    if text.get("layer_types") != _QWENAIR_TARGET_LAYER_TYPES:
+        raise ValueError("QwenAir text_config.layer_types must repeat [GDN, GDN, GDN, QSA] for 48 layers")
+    rope_parameters = text.get("rope_parameters")
+    mtp_config = text.get("mtp")
+    if not isinstance(rope_parameters, Mapping) or not isinstance(mtp_config, Mapping):
+        raise TypeError("QwenAir target text_config requires rope_parameters and mtp objects")
+    _require_exact_values(
+        rope_parameters,
+        {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10_000_000,
+            "rope_type": "default",
+        },
+        section="text_config.rope_parameters",
+    )
+    _require_exact_values(
+        mtp_config,
+        {
+            "hybrid": True,
+            "layer_types": ["full_attention"],
+            "mtp_use_hidden_state_from_layer": None,
+            "num_hidden_layers": 1,
+            "rope_theta": 10_000_000,
+        },
+        section="text_config.mtp",
+    )
+    _require_exact_values(
+        payload,
+        {
+            "image_token_id": _QWENAIR_IMAGE_TOKEN_ID,
+            "video_token_id": _QWENAIR_VIDEO_TOKEN_ID,
+            "vision_start_token_id": _QWENAIR_VISION_START_TOKEN_ID,
+            "vision_end_token_id": _QWENAIR_VISION_END_TOKEN_ID,
+        },
+        section="multimodal token contract",
+    )
+    return payload
+
+
 def _base_recipe(
     text_config: Mapping[str, Any],
     *,
@@ -155,6 +308,11 @@ def _base_recipe(
     train_iters: int,
     vision_config: Mapping[str, Any] | None = None,
     audit_visual_gradient: bool = False,
+    require_fused_gdn: bool = False,
+    moe_expert_backend: str = "loop",
+    image_token_id: int = _QWENAIR_IMAGE_TOKEN_ID,
+    video_token_id: int = _QWENAIR_VIDEO_TOKEN_ID,
+    vision_start_token_id: int = _QWENAIR_VISION_START_TOKEN_ID,
 ) -> ConfigContainer:
     if seq_length < 2 or seq_length > int(text_config["max_position_embeddings"]):
         raise ValueError("seq_length must be in [2, max_position_embeddings]")
@@ -167,6 +325,8 @@ def _base_recipe(
 
     text = deepcopy(dict(text_config))
     text["expert_model_parallel_size"] = expert_model_parallel_size
+    text["require_fused_gdn"] = require_fused_gdn
+    text["moe_expert_backend"] = moe_expert_backend
     planning_config = QwenAirTextConfig.from_hf_dict(text)
 
     # The estimator validates the same per-rank allocation guards as model
@@ -201,9 +361,9 @@ def _base_recipe(
                 "model_type": "qwen4_exp",
                 "text_config": text,
                 "vision_config": deepcopy(dict(vision_config)),
-                "image_token_id": _QWENAIR_IMAGE_TOKEN_ID,
-                "video_token_id": _QWENAIR_VIDEO_TOKEN_ID,
-                "vision_start_token_id": _QWENAIR_VISION_START_TOKEN_ID,
+                "image_token_id": image_token_id,
+                "video_token_id": video_token_id,
+                "vision_start_token_id": vision_start_token_id,
             },
             qsa_backend="te_triton",
             audit_visual_gradient=audit_visual_gradient,
@@ -270,6 +430,41 @@ def qwenair_tiny_pretrain_8gpu_b300_bf16_config() -> ConfigContainer:
     )
 
 
+def _flickr8k_dataset_config(
+    *,
+    dataset_revision: str,
+    processor_revision: str,
+    seq_length: int,
+    image_size: int,
+) -> DirectHFSFTDatasetConfig:
+    return DirectHFSFTDatasetConfig(
+        seq_length=seq_length,
+        preprocessing=ChatSFTPreprocessingConfig(loss_mode="assistant"),
+        hf_processor_path="Qwen/Qwen3.5-0.8B",
+        hf_processor_kwargs={"revision": processor_revision},
+        source=HFDatasetSourceConfig(
+            dataset_name="flickr8k",
+            split="train",
+            load_kwargs={"revision": dataset_revision},
+        ),
+        source_weights=[1.0],
+        blend_seed=1234,
+        num_workers=2,
+        dataloader_type="cyclic",
+        data_sharding=True,
+        pin_memory=True,
+        persistent_workers=True,
+        do_validation=False,
+        do_test=False,
+        skip_getting_attention_mask_from_dataset=False,
+        pad_to_max_length=False,
+        pad_to_multiple_of=1,
+        enable_in_batch_packing=False,
+        min_pixels=image_size * image_size,
+        max_pixels=image_size * image_size,
+    )
+
+
 def qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
     *,
     dataset_revision: str,
@@ -295,32 +490,13 @@ def qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
         vision_config=_tiny_vision_config(),
         audit_visual_gradient=True,
     )
-    cfg.dataset = DirectHFSFTDatasetConfig(
+    # A one-source blend preserves every image-caption pair while applying the
+    # deterministic seed-1234 shuffle before the bounded run is cut.
+    cfg.dataset = _flickr8k_dataset_config(
+        dataset_revision=dataset_revision,
+        processor_revision=processor_revision,
         seq_length=128,
-        preprocessing=ChatSFTPreprocessingConfig(loss_mode="assistant"),
-        hf_processor_path="Qwen/Qwen3.5-0.8B",
-        hf_processor_kwargs={"revision": processor_revision},
-        source=HFDatasetSourceConfig(
-            dataset_name="flickr8k",
-            load_kwargs={"revision": dataset_revision},
-        ),
-        # A one-source blend preserves every image-caption pair while applying
-        # the deterministic blend shuffle before the 16,384-sample run is cut.
-        source_weights=[1.0],
-        blend_seed=1234,
-        num_workers=2,
-        dataloader_type="cyclic",
-        data_sharding=True,
-        pin_memory=True,
-        persistent_workers=True,
-        do_validation=False,
-        do_test=False,
-        skip_getting_attention_mask_from_dataset=False,
-        pad_to_max_length=False,
-        pad_to_multiple_of=1,
-        enable_in_batch_packing=False,
-        min_pixels=image_size * image_size,
-        max_pixels=image_size * image_size,
+        image_size=image_size,
     )
     cfg.train.global_batch_size = global_batch_size
     cfg.optimizer.lr = 1.0e-3
@@ -336,6 +512,91 @@ def qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
     cfg.validation.eval_interval = train_iters + 1
     cfg.validation.eval_iters = 0
     cfg.checkpoint.save_interval = train_iters
+    return cfg
+
+
+def qwenair_target_multimodal_finetune_32gpu_b300_bf16_config(
+    config_path: str | Path,
+    *,
+    dataset_revision: str,
+    processor_revision: str,
+    train_iters: int = 1024,
+    global_batch_size: int = 128,
+    seq_length: int = 128,
+    image_size: int = 224,
+) -> ConfigContainer:
+    """Return the canonical full-geometry QwenAir Flickr8k diagnostic.
+
+    The model geometry and multimodal token IDs are read from the supplied
+    provenance JSON and validated against the QwenAir ``qwen4_exp`` contract.
+    MTP remains disabled because its training objective is not implemented.
+
+    Args:
+        config_path: Canonical ``bf16-model-config.json`` provenance file.
+        dataset_revision: Immutable ``tsystems/flickr8k`` revision.
+        processor_revision: Immutable Qwen3.5 processor revision.
+        train_iters: Optimizer steps; the canonical diagnostic uses 1024.
+        global_batch_size: Samples per optimizer step; canonical value is 128.
+        seq_length: Packed text and visual-token length; canonical value is 128.
+        image_size: Equal lower and upper image pixel edge budget.
+
+    Returns:
+        A 32-rank EP32 BF16 training configuration.
+
+    Raises:
+        ValueError: If run controls are invalid or the JSON is not canonical.
+    """
+    if not dataset_revision.strip() or not processor_revision.strip():
+        raise ValueError("dataset_revision and processor_revision must be immutable revisions")
+    if train_iters < 1 or global_batch_size < 1:
+        raise ValueError("train_iters and global_batch_size must be positive")
+    if global_batch_size % 32:
+        raise ValueError("global_batch_size must divide evenly across the 32-rank target run")
+
+    model_config = _read_target_multimodal_config(config_path)
+    text_config = model_config["text_config"]
+    vision_config = model_config["vision_config"]
+    patch_merge_size = int(vision_config["patch_size"]) * int(vision_config["spatial_merge_size"])
+    if image_size < patch_merge_size or image_size % patch_merge_size:
+        raise ValueError(
+            "image_size must be at least one merged patch and divisible by patch_size * spatial_merge_size"
+        )
+
+    cfg = _base_recipe(
+        text_config,
+        world_size=32,
+        expert_model_parallel_size=32,
+        seq_length=seq_length,
+        train_iters=train_iters,
+        vision_config=vision_config,
+        audit_visual_gradient=True,
+        require_fused_gdn=True,
+        image_token_id=int(model_config["image_token_id"]),
+        video_token_id=int(model_config["video_token_id"]),
+        vision_start_token_id=int(model_config["vision_start_token_id"]),
+    )
+    cfg.dataset = _flickr8k_dataset_config(
+        dataset_revision=dataset_revision,
+        processor_revision=processor_revision,
+        seq_length=seq_length,
+        image_size=image_size,
+    )
+    cfg.train.global_batch_size = global_batch_size
+    cfg.optimizer.lr = 1.0e-4
+    cfg.optimizer.min_lr = 1.0e-5
+    cfg.scheduler.lr_decay_style = "cosine"
+    cfg.scheduler.lr_warmup_iters = min(64, max(0, train_iters - 1))
+    cfg.scheduler.lr_decay_iters = train_iters
+    cfg.scheduler.lr_wsd_decay_iters = None
+    cfg.validation.eval_interval = train_iters + 1
+    cfg.validation.eval_iters = 0
+
+    # The canonical CLI is a diagnostic and must not create multi-terabyte
+    # checkpoints unless the caller supplies an explicit output directory.
+    cfg.checkpoint.save = None
+    cfg.checkpoint.load = None
+    cfg.checkpoint.save_interval = 0
+    cfg.logger.tensorboard_dir = None
     return cfg
 
 
@@ -443,6 +704,7 @@ def qwenair_text_pretrain_32gpu_b300_bf16_config(
 
 __all__ = [
     "configure_qwenair_indexed_data",
+    "qwenair_target_multimodal_finetune_32gpu_b300_bf16_config",
     "qwenair_text_pretrain_32gpu_b300_bf16_config",
     "qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config",
     "qwenair_tiny_pretrain_8gpu_b300_bf16_config",

@@ -21,6 +21,7 @@ import torch
 from megatron.core.models.qwenair import QwenAirForCausalLM, QwenAirTextConfig
 from torch import nn
 
+from megatron.bridge.models.qwenair.multimodal_model import QwenAirForConditionalGeneration
 from megatron.bridge.models.qwenair.vision_reference import QwenAirVisionTextReference
 
 
@@ -35,6 +36,20 @@ class _TinyVisual(nn.Module):
         assert pixel_values.shape[0] == int(grid_thw.prod())
         features = self.proj(pixel_values).reshape(-1, 4, 16).mean(dim=1)
         return SimpleNamespace(pooler_output=features)
+
+
+class _TinyConditionalVisual(nn.Module):
+    """Production-wrapper-shaped vision stub with an optional graph break."""
+
+    def __init__(self, *, detach_output: bool) -> None:
+        super().__init__()
+        self.proj = nn.Linear(24, 16)
+        self.detach_output = detach_output
+
+    def forward(self, pixel_values: torch.Tensor, *, grid_thw: torch.Tensor) -> torch.Tensor:
+        assert pixel_values.shape[0] == int(grid_thw.prod())
+        features = self.proj(pixel_values).reshape(-1, 4, 16).mean(dim=1)
+        return features.detach() if self.detach_output else features
 
 
 def _tiny_text_model() -> QwenAirForCausalLM:
@@ -118,3 +133,39 @@ def test_multimodal_positions_require_modality_ids() -> None:
             pixel_values=torch.zeros(8, 24),
             image_grid_thw=torch.tensor([[1, 2, 4]]),
         )
+
+
+@pytest.mark.parametrize("detach_output", [False, True])
+def test_visual_gradient_audit_rejects_a_detached_vision_branch(
+    detach_output: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first audited backward must run even when vision has no loss path."""
+    torch.manual_seed(923)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    visual = _TinyConditionalVisual(detach_output=detach_output)
+    model = QwenAirForConditionalGeneration(
+        _tiny_text_model(),
+        visual,
+        image_token_id=31,
+        video_token_id=32,
+        spatial_merge_size=2,
+        audit_visual_gradient=True,
+    )
+    input_ids = torch.tensor([[7, 31, 31, 8, 9]])
+    output = model(
+        input_ids,
+        labels=torch.tensor([[31, 31, 8, 9, -100]]),
+        pixel_values=torch.linspace(-0.2, 0.3, steps=8 * 24).reshape(8, 24),
+        image_grid_thw=torch.tensor([[1, 2, 4]]),
+    )
+    assert output.loss is not None
+
+    if detach_output:
+        with pytest.raises(RuntimeError, match="vision gradient is zero"):
+            output.loss.backward()
+        assert model._visual_gradient_audited is False
+    else:
+        output.loss.backward()
+        assert model._visual_gradient_audited is True
+        assert visual.proj.weight.grad is not None
+        assert visual.proj.weight.grad.norm() > 0

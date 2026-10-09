@@ -66,11 +66,16 @@ class QwenAirForConditionalGeneration(MegatronModule):
         self._audit_visual_gradient = bool(audit_visual_gradient)
         self._visual_gradient_audited = False
         self._visual_batch_audited = False
+        self._visual_gradient_sentinel_name: str | None = None
+        self._visual_gradient_hook_handle: Any | None = None
         if self._audit_visual_gradient:
-            parameter = next((value for value in vision_model.parameters() if value.requires_grad), None)
-            if parameter is None:
+            sentinel = next(
+                ((name, value) for name, value in vision_model.named_parameters() if value.requires_grad),
+                None,
+            )
+            if sentinel is None:
                 raise ValueError("Visual-gradient audit requires a trainable vision parameter")
-            parameter.register_hook(self._audit_gradient)
+            self._visual_gradient_sentinel_name = sentinel[0]
 
     def _audit_gradient(self, gradient: torch.Tensor) -> torch.Tensor:
         if self._visual_gradient_audited:
@@ -84,6 +89,31 @@ class QwenAirForConditionalGeneration(MegatronModule):
         if not dist.is_initialized() or dist.get_rank() == 0:
             print_rank_0(f"QWENAIR_MM_AUDIT vision_gradient_norm={float(gradient_norm):.8e}")
         return gradient
+
+    def _attach_visual_gradient_audit(self, output: QwenAirOutput) -> QwenAirOutput:
+        """Make a missing vision gradient fail the first audited backward pass.
+
+        A parameter hook alone is insufficient because PyTorch never calls it
+        when the vision branch is detached from the language loss.  A zero
+        coefficient dependency makes the sentinel participate in autograd
+        without changing the loss.  The hook then observes the real accumulated
+        gradient when the branch is connected, or an all-zero gradient when it
+        is disconnected.  Register lazily so the hook targets the parameter
+        after Bridge has moved and cast the assembled model.
+        """
+        if (
+            not self._audit_visual_gradient
+            or self._visual_gradient_audited
+            or output.loss is None
+        ):
+            return output
+        if self._visual_gradient_sentinel_name is None:
+            raise RuntimeError("Visual-gradient audit has no sentinel parameter")
+        sentinel = self.vision_model.get_parameter(self._visual_gradient_sentinel_name)
+        if self._visual_gradient_hook_handle is None:
+            self._visual_gradient_hook_handle = sentinel.register_hook(self._audit_gradient)
+        output.loss = output.loss + sentinel.reshape(-1)[0] * 0.0
+        return output
 
     def shared_embedding_or_output_weight(self) -> torch.Tensor | None:
         """Expose the decoder's tied embedding for MCore gradient finalization."""
@@ -209,7 +239,7 @@ class QwenAirForConditionalGeneration(MegatronModule):
         text_attention_mask = attention_mask
         if attention_mask is not None and bool(torch.all(attention_mask)):
             text_attention_mask = None
-        return self.language_model(
+        output = self.language_model(
             input_ids=None,
             inputs_embeds=inputs_embeds,
             ple_input_ids=input_ids,
@@ -219,6 +249,7 @@ class QwenAirForConditionalGeneration(MegatronModule):
             labels_are_shifted=labels_are_shifted,
             output_router_logits=output_router_logits,
         )
+        return self._attach_visual_gradient_audit(output)
 
 
 __all__ = ["QwenAirForConditionalGeneration"]

@@ -59,7 +59,11 @@ def _require_qwenair_mcore_api() -> None:
     config_fields = {item.name for item in fields(QwenAirTextConfig)} if is_dataclass(QwenAirTextConfig) else set()
     required_fields = {
         "layer_types",
+        "mamba_ssm_dtype",
+        "moe_expert_backend",
         "ple_layer_ids",
+        "require_fused_gdn",
+        "split_ngram_parts",
         "hc_count",
         "indexer_budget",
         "num_experts",

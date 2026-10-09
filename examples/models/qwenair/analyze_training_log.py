@@ -47,17 +47,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-steps", type=int, default=100)
+    parser.add_argument("--warmup-steps", type=int, default=10)
+    parser.add_argument("--global-batch-size", type=int)
+    parser.add_argument("--require-pass", action="store_true")
     return parser.parse_args()
 
 
 def _parse_metrics(log_path: Path) -> list[dict[str, int | float]]:
     by_step: dict[int, dict[str, int | float]] = {}
+    previous_step = 0
     with log_path.open(encoding="utf-8", errors="replace") as log_file:
         for line in log_file:
             match = _ITERATION_PATTERN.search(line)
             if match is None:
                 continue
             step = int(match.group("step"))
+            if step < previous_step:
+                by_step.clear()
             by_step[step] = {
                 "step": step,
                 "consumed_samples": int(match.group("samples")),
@@ -68,6 +74,7 @@ def _parse_metrics(log_path: Path) -> list[dict[str, int | float]]:
                 "skipped_iterations": int(match.group("skipped")),
                 "nan_iterations": int(match.group("nan")),
             }
+            previous_step = step
     return [by_step[step] for step in sorted(by_step)]
 
 
@@ -82,7 +89,13 @@ def _linear_slope(points: list[dict[str, int | float]]) -> float:
     return sum((step - mean_step) * (loss - mean_loss) for step, loss in zip(steps, losses)) / denominator
 
 
-def _summarize(metrics: list[dict[str, int | float]], expected_steps: int) -> dict[str, object]:
+def _summarize(
+    metrics: list[dict[str, int | float]],
+    expected_steps: int,
+    *,
+    warmup_steps: int,
+    global_batch_size: int | None,
+) -> dict[str, object]:
     expected = set(range(1, expected_steps + 1))
     observed = {int(point["step"]) for point in metrics}
     missing_steps = sorted(expected - observed)
@@ -96,11 +109,22 @@ def _summarize(metrics: list[dict[str, int | float]], expected_steps: int) -> di
     ]
     skipped = max((int(point["skipped_iterations"]) for point in metrics), default=0)
     nan_iterations = max((int(point["nan_iterations"]) for point in metrics), default=0)
+    consumed_sample_mismatch_steps = (
+        [
+            int(point["step"])
+            for point in metrics
+            if int(point["consumed_samples"]) != int(point["step"]) * global_batch_size
+        ]
+        if global_batch_size is not None
+        else []
+    )
 
-    early = [point for point in metrics if 11 <= int(point["step"]) <= 20]
-    late_start = max(11, expected_steps - 9)
+    early_start = warmup_steps + 1
+    early_end = min(expected_steps, early_start + 9)
+    early = [point for point in metrics if early_start <= int(point["step"]) <= early_end]
+    late_start = max(early_start, expected_steps - 9)
     late = [point for point in metrics if late_start <= int(point["step"]) <= expected_steps]
-    regression = [point for point in metrics if 11 <= int(point["step"]) <= expected_steps]
+    regression = [point for point in metrics if early_start <= int(point["step"]) <= expected_steps]
     early_losses = [float(point["lm_loss"]) for point in early]
     late_losses = [float(point["lm_loss"]) for point in late]
     early_mean = statistics.fmean(early_losses) if early_losses else math.nan
@@ -110,7 +134,13 @@ def _summarize(metrics: list[dict[str, int | float]], expected_steps: int) -> di
     early_median = statistics.median(early_losses) if early_losses else math.nan
     late_below_early_median = sum(loss < early_median for loss in late_losses)
     complete = not missing_steps and len(metrics) == expected_steps
-    healthy = complete and not nonfinite_steps and skipped == 0 and nan_iterations == 0
+    healthy = (
+        complete
+        and not nonfinite_steps
+        and skipped == 0
+        and nan_iterations == 0
+        and not consumed_sample_mismatch_steps
+    )
 
     if not healthy or not math.isfinite(slope) or late_mean >= early_mean:
         verdict = "FAIL"
@@ -130,11 +160,14 @@ def _summarize(metrics: list[dict[str, int | float]], expected_steps: int) -> di
         "nonfinite_steps": nonfinite_steps,
         "skipped_iterations": skipped,
         "nan_iterations": nan_iterations,
+        "warmup_steps": warmup_steps,
+        "global_batch_size": global_batch_size,
+        "consumed_sample_mismatch_steps": consumed_sample_mismatch_steps,
         "final_consumed_samples": int(metrics[-1]["consumed_samples"]) if metrics else 0,
         "first_loss": losses[0] if losses else math.nan,
         "last_loss": losses[-1] if losses else math.nan,
         "minimum_loss": min(losses) if losses else math.nan,
-        "early_window": [11, 20],
+        "early_window": [early_start, early_end],
         "late_window": [late_start, expected_steps],
         "early_mean": early_mean,
         "early_median": early_median,
@@ -189,6 +222,10 @@ def main() -> None:
     args = parse_args()
     if args.expected_steps < 1:
         raise ValueError("expected-steps must be positive")
+    if not 0 <= args.warmup_steps < args.expected_steps:
+        raise ValueError("warmup-steps must be in [0, expected-steps)")
+    if args.global_batch_size is not None and args.global_batch_size < 1:
+        raise ValueError("global-batch-size must be positive when set")
     if not args.log.is_file():
         raise FileNotFoundError(args.log)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -209,13 +246,20 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(metrics)
 
-    summary = _summarize(metrics, args.expected_steps)
+    summary = _summarize(
+        metrics,
+        args.expected_steps,
+        warmup_steps=args.warmup_steps,
+        global_batch_size=args.global_batch_size,
+    )
     summary["plot_written"] = _write_plot(metrics, args.output_dir / "loss_curve.png") if metrics else False
     (args.output_dir / "loss_summary.json").write_text(
         json.dumps(_json_safe(summary), indent=2, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
     _LOGGER.info("Convergence verdict: %s", summary["verdict"])
+    if args.require_pass and summary["verdict"] != "PASS":
+        raise SystemExit(f"Convergence verdict is {summary['verdict']}, expected PASS")
 
 
 if __name__ == "__main__":

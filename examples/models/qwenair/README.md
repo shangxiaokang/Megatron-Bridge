@@ -60,7 +60,47 @@ After training, extract the per-step curve and convergence verdict from the Slur
 ```bash
 uv run python examples/models/qwenair/analyze_training_log.py \
   --log /shared/logs/qwenair-real-100.out \
-  --output-dir /shared/logs/qwenair-real-100-analysis
+  --output-dir /shared/logs/qwenair-real-100-analysis \
+  --expected-steps 100 \
+  --warmup-steps 10 \
+  --global-batch-size 8
 ```
 
 The analyzer requires all 100 steps, finite metrics, and zero skipped/NaN iterations. It compares steps 11–20 with 91–100 and fits a post-warmup linear trend. A `PASS` requires at least a 2% mean loss reduction, a negative slope, and at least seven of the final ten points below the early-window median.
+
+## Real multimodal convergence run
+
+`finetune_qwenair_multimodal.py` trains the native Transformer Engine vision encoder and the QwenAir language model together. The reproducible recipe pins:
+
+- `tsystems/flickr8k` at revision `81fc5f3a41274c80f17b0406426d57cac57ce6fb`
+- `Qwen/Qwen3.5-0.8B` processor at revision `2fc06364715b967f1860aea9cf38778875588b17`
+- QwenAir image/video token IDs `248056` and `248057`
+- patch size 16, temporal patch size 2, and spatial merge size 2
+
+Flickr8k contains 8,091 images with five captions each. The adapter expands these into 40,455 image-caption pairs, then applies a seed-1234 shuffle before selecting the 16,384 samples consumed by 128 steps at global batch size 128. This selection covers 7,499 distinct images. The `224` image option is an equal minimum/maximum pixel budget; the processor preserves aspect ratio, so each sample's grid and visual-token count remain dynamic.
+
+```bash
+uv run python -m torch.distributed.run --standalone --nproc-per-node=8 \
+  examples/models/qwenair/finetune_qwenair_multimodal.py \
+  --train-iters 128 \
+  --global-batch-size 128 \
+  --image-size 224 \
+  --checkpoint-dir /shared/checkpoints/qwenair-flickr8k-128 \
+  --tensorboard-dir /shared/logs/qwenair-flickr8k-128/tensorboard
+```
+
+The bounded recipe uses BF16, EP4 x EDP2, micro batch size 1, sequence length 128, 12 warmup steps, and cosine decay. It preserves the QwenAir token, PLE, HC, MoE, QSA, and multimodal scatter contracts while reducing the text and vision widths for an integration test. The unavailable QSA indexer objective and MTP training contract remain disabled, so this run validates end-to-end image-text causal-language training rather than the complete target pretraining objective.
+
+Analyze the run with its exact schedule and batch contract:
+
+```bash
+uv run python examples/models/qwenair/analyze_training_log.py \
+  --log /shared/logs/qwenair-flickr8k-128.out \
+  --output-dir /shared/logs/qwenair-flickr8k-128-analysis \
+  --expected-steps 128 \
+  --warmup-steps 12 \
+  --global-batch-size 128 \
+  --require-pass
+```
+
+The analyzer also checks every step's consumed-sample count. A `PASS` requires exactly 128 finite steps, zero skipped/NaN iterations, a negative post-warmup slope, at least a 2% late-window mean loss reduction, and at least seven of the final ten losses below the early-window median.

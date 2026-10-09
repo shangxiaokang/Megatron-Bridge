@@ -25,7 +25,10 @@ from megatron.bridge.data.token_utils import json2token
 from megatron.bridge.utils.common_utils import resolve_path
 
 
-HFDatasetAdapter = Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any] | None]
+HFDatasetAdapter = Callable[
+    [Mapping[str, Any], Mapping[str, Any]],
+    dict[str, Any] | list[dict[str, Any]] | None,
+]
 
 # Adapters only translate source-specific columns into canonical SFT rows. They
 # deliberately do not render chat templates or tokenize; the selected shared
@@ -178,6 +181,38 @@ def _rdr_adapter(example: Mapping[str, Any], kwargs: Mapping[str, Any]) -> dict[
             {"role": "assistant", "content": [{"type": "text", "text": example["text"]}]},
         ]
     }
+
+
+def _flickr8k_adapter(example: Mapping[str, Any], kwargs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Expand one Flickr8k image and its five captions into training pairs."""
+    caption_column = str(kwargs.get("caption_column", "query"))
+    source_captions = example.get("captions")
+    captions = (
+        [str(caption) for caption in source_captions if caption not in (None, "")]
+        if isinstance(source_captions, list)
+        else []
+    )
+    if not captions:
+        caption = example.get(caption_column)
+        captions = [] if caption in (None, "") else [str(caption)]
+    if example.get("image") is None or not captions:
+        raise ValueError("Flickr8k rows require an image and a non-empty caption")
+    prompt = str(kwargs.get("prompt", "Describe this image in one sentence."))
+    return [
+        {
+            "conversation": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": example["image"]},
+                        {"type": "text", "text": prompt},
+                    ],
+                },
+                {"role": "assistant", "content": [{"type": "text", "text": caption}]},
+            ]
+        }
+        for caption in captions
+    ]
 
 
 def _cord_v2_adapter(example: Mapping[str, Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
@@ -397,6 +432,7 @@ _ADAPTERS: dict[str, HFDatasetAdapter] = {
     "openmathinstruct2": _openmathinstruct2_adapter,
     "openmathinstruct2_thinking": _openmathinstruct2_thinking_adapter,
     "rdr": _rdr_adapter,
+    "flickr8k": _flickr8k_adapter,
     "cord_v2": _cord_v2_adapter,
     "medpix": _medpix_adapter,
     "raven": _raven_adapter,
@@ -436,7 +472,15 @@ def adapt_hf_dataset(
     else:
         adapter = _ADAPTERS[adapter_name]
     kwargs = adapter_kwargs or {}
-    examples = [adapted for row in dataset if (adapted := adapter(row, kwargs)) is not None]
+    examples: list[dict[str, Any]] = []
+    for row in dataset:
+        adapted = adapter(row, kwargs)
+        if adapted is None:
+            continue
+        if isinstance(adapted, list):
+            examples.extend(adapted)
+        else:
+            examples.append(adapted)
     if not examples:
         raise ValueError("Hugging Face source produced no examples after schema adaptation.")
     return examples

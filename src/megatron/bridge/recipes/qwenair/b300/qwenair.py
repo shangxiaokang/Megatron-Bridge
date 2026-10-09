@@ -26,7 +26,9 @@ import torch
 from megatron.core.models.qwenair import QwenAirTextConfig, estimate_qwenair_training_memory
 from megatron.core.models.qwenair.ple import qwenair_ngram_metadata
 
-from megatron.bridge.models.qwenair import QwenAirModelProvider
+from megatron.bridge.data import DirectHFSFTDatasetConfig, HFDatasetSourceConfig
+from megatron.bridge.data.sft_processing import ChatSFTPreprocessingConfig
+from megatron.bridge.models.qwenair import QwenAirModelProvider, QwenAirMultimodalModelProvider
 from megatron.bridge.recipes.common import _pretrain_common
 from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
 from megatron.bridge.training.config import ConfigContainer
@@ -37,6 +39,9 @@ _QWENAIR_DDP_BUCKET_SIZE = 40_000_000
 _QWENAIR_VOCAB_SIZE = 248_320
 _QWENAIR_EOD_ID = 248_044
 _QWENAIR_REAL_DATA_TRAIN_ITERS = 100
+_QWENAIR_IMAGE_TOKEN_ID = 248_056
+_QWENAIR_VIDEO_TOKEN_ID = 248_057
+_QWENAIR_VISION_START_TOKEN_ID = 248_053
 
 
 def _tiny_text_config() -> dict[str, Any]:
@@ -104,6 +109,24 @@ def _target_text_config() -> dict[str, Any]:
     return text
 
 
+def _tiny_vision_config() -> dict[str, Any]:
+    """Return a compute-bounded ViT preserving QwenAir's patch/token contract."""
+    return {
+        "model_type": "qwen4_exp",
+        "depth": 2,
+        "hidden_size": 64,
+        "num_heads": 4,
+        "intermediate_size": 256,
+        "patch_size": 16,
+        "temporal_patch_size": 2,
+        "spatial_merge_size": 2,
+        "in_channels": 3,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 32,
+        "deepstack_visual_indexes": [],
+    }
+
+
 def _read_target_text_config(config_path: str | Path) -> dict[str, Any]:
     path = Path(config_path)
     with path.open(encoding="utf-8") as config_file:
@@ -126,6 +149,8 @@ def _base_recipe(
     expert_model_parallel_size: int,
     seq_length: int,
     train_iters: int,
+    vision_config: Mapping[str, Any] | None = None,
+    audit_visual_gradient: bool = False,
 ) -> ConfigContainer:
     if seq_length < 2 or seq_length > int(text_config["max_position_embeddings"]):
         raise ValueError("seq_length must be in [2, max_position_embeddings]")
@@ -164,7 +189,21 @@ def _base_recipe(
     text["max_single_rank_parameters"] = max(1, estimate.routed_expert_parameters_per_rank)
 
     cfg = _pretrain_common()
-    cfg.model = QwenAirModelProvider.from_hf_config(text, qsa_backend="te_triton")
+    if vision_config is None:
+        cfg.model = QwenAirModelProvider.from_hf_config(text, qsa_backend="te_triton")
+    else:
+        cfg.model = QwenAirMultimodalModelProvider.from_hf_config(
+            {
+                "model_type": "qwen4_exp",
+                "text_config": text,
+                "vision_config": deepcopy(dict(vision_config)),
+                "image_token_id": _QWENAIR_IMAGE_TOKEN_ID,
+                "video_token_id": _QWENAIR_VIDEO_TOKEN_ID,
+                "vision_start_token_id": _QWENAIR_VISION_START_TOKEN_ID,
+            },
+            qsa_backend="te_triton",
+            audit_visual_gradient=audit_visual_gradient,
+        )
     cfg.model.tensor_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_layout = None
@@ -225,6 +264,70 @@ def qwenair_tiny_pretrain_8gpu_b300_bf16_config() -> ConfigContainer:
         seq_length=64,
         train_iters=2,
     )
+
+
+def qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+    *,
+    dataset_revision: str,
+    processor_revision: str,
+    train_iters: int = 128,
+    global_batch_size: int = 128,
+    image_size: int = 224,
+) -> ConfigContainer:
+    """Return the reproducible Flickr8k image-caption convergence recipe."""
+    if not dataset_revision.strip() or not processor_revision.strip():
+        raise ValueError("dataset_revision and processor_revision must be immutable revisions")
+    if train_iters < 1 or global_batch_size < 1:
+        raise ValueError("train_iters and global_batch_size must be positive")
+    if image_size < 32 or image_size % 32:
+        raise ValueError("image_size must be at least 32 and divisible by patch_size * merge_size (32)")
+
+    cfg = _base_recipe(
+        _tiny_text_config(),
+        world_size=8,
+        expert_model_parallel_size=4,
+        seq_length=128,
+        train_iters=train_iters,
+        vision_config=_tiny_vision_config(),
+        audit_visual_gradient=True,
+    )
+    cfg.dataset = DirectHFSFTDatasetConfig(
+        seq_length=128,
+        preprocessing=ChatSFTPreprocessingConfig(loss_mode="assistant"),
+        hf_processor_path="Qwen/Qwen3.5-0.8B",
+        hf_processor_kwargs={"revision": processor_revision},
+        source=HFDatasetSourceConfig(
+            dataset_name="flickr8k",
+            load_kwargs={"revision": dataset_revision},
+        ),
+        # A one-source blend preserves every image-caption pair while applying
+        # the deterministic blend shuffle before the 16,384-sample run is cut.
+        source_weights=[1.0],
+        blend_seed=1234,
+        num_workers=2,
+        dataloader_type="cyclic",
+        data_sharding=True,
+        pin_memory=True,
+        persistent_workers=True,
+        do_validation=False,
+        do_test=False,
+        skip_getting_attention_mask_from_dataset=False,
+        pad_to_max_length=False,
+        pad_to_multiple_of=1,
+        enable_in_batch_packing=False,
+        min_pixels=image_size * image_size,
+        max_pixels=image_size * image_size,
+    )
+    cfg.train.global_batch_size = global_batch_size
+    cfg.optimizer.lr = 1.0e-3
+    cfg.optimizer.min_lr = 1.0e-4
+    cfg.scheduler.lr_warmup_iters = min(12, max(1, train_iters // 10))
+    cfg.scheduler.lr_decay_iters = train_iters
+    cfg.scheduler.lr_wsd_decay_iters = None
+    cfg.validation.eval_interval = train_iters + 1
+    cfg.validation.eval_iters = 0
+    cfg.checkpoint.save_interval = train_iters
+    return cfg
 
 
 def configure_qwenair_indexed_data(
@@ -332,5 +435,6 @@ def qwenair_text_pretrain_32gpu_b300_bf16_config(
 __all__ = [
     "configure_qwenair_indexed_data",
     "qwenair_text_pretrain_32gpu_b300_bf16_config",
+    "qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config",
     "qwenair_tiny_pretrain_8gpu_b300_bf16_config",
 ]

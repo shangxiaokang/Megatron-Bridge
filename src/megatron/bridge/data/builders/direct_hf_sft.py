@@ -94,6 +94,8 @@ class DirectHFSFTDatasetConfig(DataloaderConfig):
     pad_to_multiple_of: int = 128
     in_batch_packing_pad_to_multiple_of: int = 1
     megatron_mimo_scalable_dp: bool = False
+    min_pixels: int | None = None
+    max_pixels: int | None = None
 
     def validate(self) -> None:
         """Validate declarative source and dataset settings."""
@@ -134,6 +136,12 @@ class DirectHFSFTDatasetConfig(DataloaderConfig):
             raise ValueError("pad_to_multiple_of must be greater than 0.")
         if self.in_batch_packing_pad_to_multiple_of <= 0:
             raise ValueError("in_batch_packing_pad_to_multiple_of must be greater than 0.")
+        if self.min_pixels is not None and self.min_pixels <= 0:
+            raise ValueError("min_pixels must be positive when set.")
+        if self.max_pixels is not None and self.max_pixels <= 0:
+            raise ValueError("max_pixels must be positive when set.")
+        if self.min_pixels is not None and self.max_pixels is not None and self.min_pixels > self.max_pixels:
+            raise ValueError("min_pixels must not exceed max_pixels.")
 
     @property
     def training_sources(self) -> list[HFDatasetSourceConfig]:
@@ -345,6 +353,8 @@ def build_direct_hf_sft_split(
         enable_in_batch_packing=config.enable_in_batch_packing,
         defer_in_batch_packing_to_step=config.defer_in_batch_packing_to_step,
         in_batch_packing_pad_to_multiple_of=config.in_batch_packing_pad_to_multiple_of,
+        min_pixels=config.min_pixels,
+        max_pixels=config.max_pixels,
     )
 
 

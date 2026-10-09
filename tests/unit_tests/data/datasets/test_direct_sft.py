@@ -97,6 +97,26 @@ def test_direct_sft_dataset_forwards_supported_packing_options():
     }
 
 
+def test_direct_sft_dataset_forwards_visual_pixel_limits():
+    def _visual_collate(examples, processor, *, min_pixels=None, max_pixels=None):
+        del examples, processor
+        return {"min_pixels": min_pixels, "max_pixels": max_pixels}
+
+    dataset = DirectSFTDataset(
+        base_examples=[_example()],
+        target_length=1,
+        processor=_Processor(),
+        collate_impl=_visual_collate,
+        min_pixels=32 * 32,
+        max_pixels=224 * 224,
+    )
+
+    assert dataset.collate_fn([dataset[0]]) == {
+        "min_pixels": 32 * 32,
+        "max_pixels": 224 * 224,
+    }
+
+
 def test_direct_sft_dataset_rejects_collate_without_packing_support():
     def _legacy_collate(examples, processor):
         del processor

@@ -9,11 +9,12 @@ import pytest
 import torch
 from megatron.core.models.qwenair import QwenAirTextConfig, estimate_qwenair_training_memory
 
-from megatron.bridge.models.qwenair import QwenAirModelProvider, qwenair_provider
+from megatron.bridge.models.qwenair import QwenAirModelProvider, QwenAirMultimodalModelProvider, qwenair_provider
 from megatron.bridge.recipes.qwenair.b300.qwenair import (
     _tiny_text_config,
     configure_qwenair_indexed_data,
     qwenair_text_pretrain_32gpu_b300_bf16_config,
+    qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config,
     qwenair_tiny_pretrain_8gpu_b300_bf16_config,
 )
 
@@ -44,6 +45,29 @@ def test_tiny_recipe_uses_ep4_edp2_compatible_policy() -> None:
     assert cfg.logger.log_interval == 1
     assert cfg.mixed_precision.bf16 is True
     assert cfg.optimizer.main_params_dtype == torch.float32
+
+
+def test_tiny_multimodal_recipe_uses_real_shuffled_flickr8k_contract() -> None:
+    cfg = qwenair_tiny_multimodal_finetune_8gpu_b300_bf16_config(
+        dataset_revision="dataset-commit",
+        processor_revision="processor-commit",
+    )
+
+    assert isinstance(cfg.model, QwenAirMultimodalModelProvider)
+    assert cfg.model.expert_model_parallel_size == 4
+    assert cfg.model.image_token_id == 248_056
+    assert cfg.model.qwenair_vision_config["patch_size"] == 16
+    assert cfg.model.qwenair_vision_config["temporal_patch_size"] == 2
+    assert cfg.model.qwenair_vision_config["spatial_merge_size"] == 2
+    assert cfg.dataset.source.dataset_name == "flickr8k"
+    assert cfg.dataset.source.load_kwargs == {"revision": "dataset-commit"}
+    assert cfg.dataset.source_weights == [1.0]
+    assert cfg.dataset.hf_processor_kwargs == {"revision": "processor-commit"}
+    assert cfg.dataset.min_pixels == 224 * 224
+    assert cfg.dataset.max_pixels == 224 * 224
+    assert cfg.train.train_iters == 128
+    assert cfg.train.global_batch_size == 128
+    assert cfg.scheduler.lr_warmup_iters == 12
 
 
 def test_tiny_real_data_recipe_uses_indexed_data_and_bounded_schedule(tmp_path) -> None:

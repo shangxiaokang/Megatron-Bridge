@@ -12,10 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""QwenAir text-only reference bridge."""
+"""QwenAir text and multimodal training bridge."""
 
+from megatron.bridge.models.qwenair.multimodal_model import QwenAirForConditionalGeneration
 from megatron.bridge.models.qwenair.qwenair_bridge import QwenAirTextBridge
-from megatron.bridge.models.qwenair.qwenair_provider import QwenAirModelProvider
+from megatron.bridge.models.qwenair.qwenair_provider import QwenAirModelProvider, QwenAirMultimodalModelProvider
 
 
-__all__ = ["QwenAirModelProvider", "QwenAirTextBridge"]
+__all__ = [
+    "QwenAirForConditionalGeneration",
+    "QwenAirModelProvider",
+    "QwenAirMultimodalModelProvider",
+    "QwenAirTextBridge",
+]

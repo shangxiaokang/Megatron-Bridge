@@ -142,6 +142,33 @@ def test_cord_adapter_multiple_ground_truths_is_independent_of_global_rng():
     assert first_adaptation == second_adaptation
 
 
+def test_flickr8k_adapter_expands_captions_and_falls_back_to_query():
+    images = [object(), object()]
+    captions = [f"Caption {index}." for index in range(5)]
+    adapted = adapt_hf_dataset(
+        [
+            {"image": images[0], "query": "Unused query.", "captions": captions},
+            {"image": images[1], "query": "Fallback caption.", "captions": []},
+        ],
+        adapter_name="flickr8k",
+    )
+
+    expected_captions = [*captions, "Fallback caption."]
+    expected_images = [images[0]] * len(captions) + [images[1]]
+    assert [row["conversation"][1]["content"][0]["text"] for row in adapted] == expected_captions
+    for row, image, caption in zip(adapted, expected_images, expected_captions, strict=True):
+        assert row["conversation"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": "Describe this image in one sentence."},
+                ],
+            },
+            {"role": "assistant", "content": [{"type": "text", "text": caption}]},
+        ]
+
+
 @pytest.mark.parametrize(
     ("adapter_name", "row"),
     [

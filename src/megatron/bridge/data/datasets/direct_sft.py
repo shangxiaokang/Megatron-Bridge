@@ -68,6 +68,8 @@ class DirectSFTDataset(torch.utils.data.Dataset):
         enable_in_batch_packing: bool = False,
         defer_in_batch_packing_to_step: bool = False,
         in_batch_packing_pad_to_multiple_of: int = 1,
+        min_pixels: int | None = None,
+        max_pixels: int | None = None,
     ) -> None:
         assert isinstance(base_examples, list) and len(base_examples) > 0, "base_examples must be a non-empty list"
         self._base_examples = base_examples
@@ -91,6 +93,10 @@ class DirectSFTDataset(torch.utils.data.Dataset):
             "enable_in_batch_packing": enable_in_batch_packing and not defer_in_batch_packing_to_step,
             "in_batch_packing_pad_to_multiple_of": in_batch_packing_pad_to_multiple_of,
         }
+        if min_pixels is not None:
+            collate_kwargs["min_pixels"] = min_pixels
+        if max_pixels is not None:
+            collate_kwargs["max_pixels"] = max_pixels
         if explicit_collate_impl:
             collate_kwargs = _collate_kwargs_for_impl(
                 collate_impl,

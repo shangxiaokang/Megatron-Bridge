@@ -19,9 +19,12 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass, field, fields, is_dataclass
 from inspect import signature
+from types import SimpleNamespace
 from typing import Any, Literal, Mapping
 
 import torch
+from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TENorm, TERowParallelLinear
+from megatron.core.models.vision.vit_layer_specs import get_vit_layer_with_transformer_engine_spec
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig as MCoreTransformerConfig
 
@@ -36,7 +39,19 @@ except ModuleNotFoundError as exc:
         ) from exc
     raise
 
+try:
+    from megatron.core.models.qwenair.model import (
+        _validate_te_qsa_token_mask as _mcore_te_qsa_padding_guard,
+    )
+except ImportError:
+    _mcore_te_qsa_padding_guard = None
+
 from megatron.bridge.models.gpt_provider import GPTModelProvider
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.attention import Qwen3VLSelfAttention
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.transformer_config import get_vision_model_config
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import PatchMergerSubmodules
+from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.vision_model import Qwen3VLVisionModel
+from megatron.bridge.models.qwenair.multimodal_model import QwenAirForConditionalGeneration
 
 
 def _require_qwenair_mcore_api() -> None:
@@ -56,6 +71,8 @@ def _require_qwenair_mcore_api() -> None:
     init_fields = set(signature(QwenAirForCausalLM.__init__).parameters)
     required_forward = {
         "input_ids",
+        "inputs_embeds",
+        "ple_input_ids",
         "attention_mask",
         "position_ids",
         "labels",
@@ -70,10 +87,11 @@ def _require_qwenair_mcore_api() -> None:
         or not issubclass(QwenAirForCausalLM, MegatronModule)
         or not required_forward <= forward_fields
         or "pg_collection" not in init_fields
+        or not callable(_mcore_te_qsa_padding_guard)
     ):
         raise RuntimeError(
             "QwenAir Bridge requires the matching Megatron-Core QwenAir text API; "
-            "update 3rdparty/Megatron-LM to the QwenAir implementation commit"
+            "update 3rdparty/Megatron-LM to the QwenAir right-padding implementation commit"
         )
 
 
@@ -261,3 +279,114 @@ class QwenAirModelProvider(GPTModelProvider):
                 "or an explicit provider._pg_collection"
             )
         return QwenAirForCausalLM(config, pg_collection=pg_collection)
+
+
+@dataclass
+class QwenAirMultimodalModelProvider(QwenAirModelProvider):
+    """Construct native QwenAir vision and text modules under one DDP root."""
+
+    qwenair_vision_config: dict[str, Any] = field(default_factory=dict)
+    image_token_id: int = 248_056
+    video_token_id: int = 248_057
+    vision_start_token_id: int = 248_053
+    audit_visual_gradient: bool = False
+
+    @classmethod
+    def from_hf_config(
+        cls,
+        hf_config: Any,
+        *,
+        qsa_backend: Literal["dense", "te_reference", "te_indexed_sdpa", "te_triton"] = "dense",
+        audit_visual_gradient: bool = False,
+    ) -> QwenAirMultimodalModelProvider:
+        """Build from a composite ``qwen4_exp``-compatible mapping."""
+        config = _config_dict(hf_config)
+        if config.get("model_type") not in (None, "qwen4_exp"):
+            raise ValueError("QwenAir multimodal provider requires model_type=qwen4_exp")
+        text = config.get("text_config")
+        vision = config.get("vision_config")
+        if not isinstance(text, Mapping) or not isinstance(vision, Mapping):
+            raise ValueError("QwenAir multimodal config requires text_config and vision_config objects")
+        text = dict(text)
+        text.setdefault("model_type", "qwen4_exp_text")
+        provider = super().from_hf_config(text, qsa_backend=qsa_backend)
+        provider.qwenair_vision_config = dict(vision)
+        provider.image_token_id = int(config.get("image_token_id", 248_056))
+        provider.video_token_id = int(config.get("video_token_id", 248_057))
+        provider.vision_start_token_id = int(config.get("vision_start_token_id", 248_053))
+        provider.audit_visual_gradient = bool(audit_visual_gradient)
+        provider._validate_multimodal_contract()
+        return provider
+
+    def _validate_multimodal_contract(self) -> None:
+        required = {
+            "depth",
+            "hidden_size",
+            "num_heads",
+            "intermediate_size",
+            "patch_size",
+            "temporal_patch_size",
+            "spatial_merge_size",
+            "in_channels",
+            "num_position_embeddings",
+            "out_hidden_size",
+        }
+        missing = sorted(required.difference(self.qwenair_vision_config))
+        if missing:
+            raise ValueError(f"QwenAir vision_config is missing: {', '.join(missing)}")
+        if int(self.qwenair_vision_config["out_hidden_size"]) != int(self.hidden_size):
+            raise ValueError("vision_config.out_hidden_size must equal text hidden_size")
+        if int(self.qwenair_vision_config["hidden_size"]) % int(self.qwenair_vision_config["num_heads"]):
+            raise ValueError("vision hidden_size must divide evenly by num_heads")
+        if int(self.qwenair_vision_config["spatial_merge_size"]) < 1:
+            raise ValueError("vision spatial_merge_size must be positive")
+        for name in ("image_token_id", "video_token_id", "vision_start_token_id"):
+            value = int(getattr(self, name))
+            if not 0 <= value < int(self.vocab_size):
+                raise ValueError(f"{name} must be in [0, vocab_size)")
+
+    def provide(
+        self,
+        pre_process: bool | None = None,
+        post_process: bool | None = None,
+        vp_stage: int | None = None,
+    ) -> QwenAirForConditionalGeneration:
+        """Instantiate QwenAir plus the native TE-backed Qwen vision encoder."""
+        self._validate_multimodal_contract()
+        language_model = super().provide(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
+        if self._pg_collection is None:
+            raise RuntimeError("QwenAir multimodal construction requires an explicit process-group collection")
+
+        vision_hf_config = SimpleNamespace(**self.qwenair_vision_config)
+        if not hasattr(vision_hf_config, "deepstack_visual_indexes"):
+            vision_hf_config.deepstack_visual_indexes = []
+        if vision_hf_config.deepstack_visual_indexes:
+            raise NotImplementedError("QwenAir does not use Qwen3-VL deepstack visual features")
+        vision_layer_spec = get_vit_layer_with_transformer_engine_spec()
+        vision_layer_spec.submodules.self_attention.module = Qwen3VLSelfAttention
+        vision_config = get_vision_model_config(vision_hf_config, megatron_config=self)
+        vision_config.pipeline_model_parallel_size = 1
+        vision_config.first_pipeline_num_layers = None
+        vision_model = Qwen3VLVisionModel(
+            vision_config,
+            vision_layer_spec,
+            PatchMergerSubmodules(
+                patch_norm=TENorm,
+                linear_fc1=TEColumnParallelLinear,
+                linear_fc2=TERowParallelLinear,
+            ),
+            pre_process=True,
+            post_process=True,
+            pg_collection=self._pg_collection,
+        )
+        return QwenAirForConditionalGeneration(
+            language_model,
+            vision_model,
+            image_token_id=self.image_token_id,
+            video_token_id=self.video_token_id,
+            spatial_merge_size=int(self.qwenair_vision_config["spatial_merge_size"]),
+            audit_visual_gradient=self.audit_visual_gradient,
+        )
+
+
+__all__ = ["QwenAirModelProvider", "QwenAirMultimodalModelProvider"]

@@ -156,6 +156,11 @@ _HF_DATASET_PRESETS: dict[str, _HFDatasetPreset] = {
         schema_adapter="cord_v2",
         supported_splits=("train", "validation", "test"),
     ),
+    "flickr8k": _HFDatasetPreset(
+        path_or_dataset="tsystems/flickr8k",
+        schema_adapter="flickr8k",
+        supported_splits=("train",),
+    ),
     "cv17": _HFDatasetPreset(
         path_or_dataset="ysdede/commonvoice_17_tr_fixed",
         schema_adapter="cv17",

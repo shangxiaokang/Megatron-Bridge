@@ -15,7 +15,7 @@
 """Train canonical full-geometry QwenAir on Flickr8k for 1024 steps.
 
 The default run uses 32 B300 ranks, EP32, BF16, sequence length 128, global
-batch size 128, and a 64-step warmup into cosine decay from 1e-4 to 1e-5.
+batch size 128, and a 64-step warmup into cosine decay from 3e-4 to 3e-5.
 Persistent outputs are disabled unless their directories are supplied.
 """
 

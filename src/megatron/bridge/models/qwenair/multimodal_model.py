@@ -101,11 +101,7 @@ class QwenAirForConditionalGeneration(MegatronModule):
         is disconnected.  Register lazily so the hook targets the parameter
         after Bridge has moved and cast the assembled model.
         """
-        if (
-            not self._audit_visual_gradient
-            or self._visual_gradient_audited
-            or output.loss is None
-        ):
+        if not self._audit_visual_gradient or self._visual_gradient_audited or output.loss is None:
             return output
         if self._visual_gradient_sentinel_name is None:
             raise RuntimeError("Visual-gradient audit has no sentinel parameter")

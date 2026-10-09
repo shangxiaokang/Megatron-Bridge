@@ -126,8 +126,11 @@ not accept the language-only `qwen3_8_flash_next` alias.
 
 The default training contract is EP32, BF16, sequence length 128, global batch
 size 128, micro batch size 1, and 1024 optimizer steps. The learning rate warms
-up for 64 steps to `1e-4`, then decays with a cosine schedule to `1e-5` at step
-1024. The run consumes 131,072 image-caption pairs, approximately 3.24 passes
+up for 64 steps to `3e-4`, then decays with a cosine schedule to `3e-5` at step
+1024. The provenance JSON defines model geometry and token IDs but does not
+define an optimizer or learning-rate schedule, so the formal run uses the
+Bridge `_pretrain_common` and Qwen-family pretraining learning-rate defaults.
+The run consumes 131,072 image-caption pairs, approximately 3.24 passes
 over the 40,455 Flickr8k pairs, so it is an optimizer and numerical-health
 diagnostic rather than a pretraining-quality measurement.
 

@@ -387,8 +387,8 @@ def test_target_multimodal_recipe_matches_canonical_32_b300_run(tmp_path: Path) 
     assert cfg.train.train_iters == 1024
     assert cfg.train.micro_batch_size == 1
     assert cfg.train.global_batch_size == 128
-    assert cfg.optimizer.lr == 1.0e-4
-    assert cfg.optimizer.min_lr == 1.0e-5
+    assert cfg.optimizer.lr == 3.0e-4
+    assert cfg.optimizer.min_lr == 3.0e-5
     assert cfg.scheduler.lr_decay_style == "cosine"
     assert cfg.scheduler.lr_warmup_iters == 64
     assert cfg.scheduler.lr_decay_iters == 1024
@@ -434,6 +434,11 @@ def test_target_multimodal_cli_defaults_to_no_checkpoint(tmp_path: Path) -> None
     assert cfg.dataset.source.split == "train"
     assert cfg.train.train_iters == 1024
     assert cfg.train.global_batch_size == 128
+    assert cfg.optimizer.lr == 3.0e-4
+    assert cfg.optimizer.min_lr == 3.0e-5
+    assert cfg.scheduler.lr_decay_style == "cosine"
+    assert cfg.scheduler.lr_warmup_iters == 64
+    assert cfg.scheduler.lr_decay_iters == cfg.train.train_iters
     assert cfg.checkpoint.save is None
     assert cfg.checkpoint.load is None
     assert cfg.checkpoint.save_interval == 0

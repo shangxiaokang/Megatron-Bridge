@@ -582,8 +582,10 @@ def qwenair_target_multimodal_finetune_32gpu_b300_bf16_config(
         image_size=image_size,
     )
     cfg.train.global_batch_size = global_batch_size
-    cfg.optimizer.lr = 1.0e-4
-    cfg.optimizer.min_lr = 1.0e-5
+    # The provenance JSON defines model geometry, not optimization. Keep this
+    # diagnostic aligned with the Bridge/Qwen-family pretraining defaults.
+    cfg.optimizer.lr = 3.0e-4
+    cfg.optimizer.min_lr = 3.0e-5
     cfg.scheduler.lr_decay_style = "cosine"
     cfg.scheduler.lr_warmup_iters = min(64, max(0, train_iters - 1))
     cfg.scheduler.lr_decay_iters = train_iters

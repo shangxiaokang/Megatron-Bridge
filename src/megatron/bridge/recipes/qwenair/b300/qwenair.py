@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""B300 recipes for QwenAir EP training with mock text data."""
+"""B300 recipes for QwenAir EP training with mock or indexed text data."""
 
 from __future__ import annotations
 
@@ -34,14 +34,20 @@ from megatron.bridge.training.mixed_precision import bf16_mixed
 
 
 _QWENAIR_DDP_BUCKET_SIZE = 40_000_000
+_QWENAIR_VOCAB_SIZE = 248_320
+_QWENAIR_EOD_ID = 248_044
+_QWENAIR_REAL_DATA_TRAIN_ITERS = 100
 
 
 def _tiny_text_config() -> dict[str, Any]:
     return {
         "model_type": "qwen4_exp_text",
         "dtype": "bfloat16",
-        "vocab_size": 128,
-        "eos_token_id": 4,
+        # Keep the checkpoint-compatible token contract even though the model
+        # geometry is intentionally tiny. This lets the same recipe consume
+        # indexed data produced with the QwenAir tokenizer.
+        "vocab_size": _QWENAIR_VOCAB_SIZE,
+        "eos_token_id": _QWENAIR_EOD_ID,
         "hidden_size": 32,
         "num_hidden_layers": 4,
         "layer_types": [
@@ -125,6 +131,10 @@ def _base_recipe(
         raise ValueError("seq_length must be in [2, max_position_embeddings]")
     if world_size % expert_model_parallel_size:
         raise ValueError("world_size must divide evenly by expert_model_parallel_size")
+    vocab_size = int(text_config["vocab_size"])
+    eos_token_id = int(text_config["eos_token_id"])
+    if not 0 <= eos_token_id < vocab_size:
+        raise ValueError("eos_token_id must be in [0, vocab_size)")
 
     text = deepcopy(dict(text_config))
     text["expert_model_parallel_size"] = expert_model_parallel_size
@@ -171,8 +181,8 @@ def _base_recipe(
 
     cfg.tokenizer.tokenizer_type = "NullTokenizer"
     cfg.tokenizer.tokenizer_model = None
-    cfg.tokenizer.vocab_size = int(text["vocab_size"])
-    cfg.tokenizer.null_tokenizer_eod_id = int(text["eos_token_id"])
+    cfg.tokenizer.vocab_size = vocab_size
+    cfg.tokenizer.null_tokenizer_eod_id = eos_token_id
     cfg.tokenizer.use_tokenizer_vocab_size = False
     cfg.dataset.seq_length = seq_length
     cfg.dataset.blend = None
@@ -217,6 +227,83 @@ def qwenair_tiny_pretrain_8gpu_b300_bf16_config() -> ConfigContainer:
     )
 
 
+def configure_qwenair_indexed_data(
+    config: ConfigContainer,
+    data_path: str | Path,
+    *,
+    train_iters: int = _QWENAIR_REAL_DATA_TRAIN_ITERS,
+    tokenizer_vocab_size: int | None = None,
+    tokenizer_eod_id: int | None = None,
+    learning_rate: float | None = None,
+    min_learning_rate: float | None = None,
+) -> ConfigContainer:
+    """Configure a QwenAir recipe for a bounded indexed-data training run.
+
+    ``data_path`` is the Megatron indexed-dataset prefix, without ``.bin`` or
+    ``.idx``. The data must be pre-tokenized with the tokenizer matching the
+    recipe's vocabulary and EOD token.
+
+    Args:
+        config: QwenAir recipe to update.
+        data_path: Megatron indexed-dataset prefix.
+        train_iters: Number of optimizer steps to run.
+        tokenizer_vocab_size: Optional from-scratch tokenizer vocabulary size.
+        tokenizer_eod_id: EOD token paired with ``tokenizer_vocab_size``.
+        learning_rate: Optional peak learning rate for a bounded run.
+        min_learning_rate: Minimum rate paired with ``learning_rate``.
+
+    Returns:
+        The updated recipe config.
+
+    Raises:
+        ValueError: If the path is empty or ``train_iters`` is not positive.
+    """
+    normalized_data_path = str(data_path).strip()
+    if not normalized_data_path:
+        raise ValueError("data_path must be a non-empty indexed-dataset prefix")
+    if train_iters < 1:
+        raise ValueError("train_iters must be positive")
+    if (tokenizer_vocab_size is None) != (tokenizer_eod_id is None):
+        raise ValueError("tokenizer_vocab_size and tokenizer_eod_id must be provided together")
+    if (learning_rate is None) != (min_learning_rate is None):
+        raise ValueError("learning_rate and min_learning_rate must be provided together")
+    if learning_rate is not None and min_learning_rate is not None:
+        if learning_rate <= 0 or not 0 <= min_learning_rate <= learning_rate:
+            raise ValueError("learning rates must satisfy 0 <= min_learning_rate <= learning_rate")
+        config.optimizer.lr = learning_rate
+        config.optimizer.min_lr = min_learning_rate
+    if tokenizer_vocab_size is not None and tokenizer_eod_id is not None:
+        if tokenizer_vocab_size < 1 or not 0 <= tokenizer_eod_id < tokenizer_vocab_size:
+            raise ValueError("tokenizer_eod_id must be in [0, tokenizer_vocab_size)")
+        # This override is intended for from-scratch convergence tests with an
+        # existing offline tokenizer. Update every source read by the provider
+        # before model construction so the token contract cannot diverge.
+        config.model.qwenair_text_config["vocab_size"] = tokenizer_vocab_size
+        config.model.qwenair_text_config["eos_token_id"] = tokenizer_eod_id
+        config.model.vocab_size = tokenizer_vocab_size
+        config.tokenizer.vocab_size = tokenizer_vocab_size
+        config.tokenizer.null_tokenizer_eod_id = tokenizer_eod_id
+
+    # A list keeps a valid prefix containing whitespace as one dataset. The
+    # config finalizer intentionally treats a string as CLI-style whitespace-
+    # separated paths.
+    config.dataset.data_path = [normalized_data_path]
+    config.dataset.blend = None
+    config.dataset.blend_per_split = None
+    config.train.train_iters = train_iters
+    config.validation.eval_interval = train_iters + 1
+    config.validation.eval_iters = 0
+    config.checkpoint.save_interval = train_iters
+
+    # The general pretraining default has a 500-step warmup. For a bounded
+    # convergence run that would consume almost the entire schedule, so use a
+    # ten-percent warmup capped at ten steps and decay across the full run.
+    config.scheduler.lr_warmup_iters = min(10, train_iters // 10)
+    config.scheduler.lr_decay_iters = train_iters
+    config.scheduler.lr_wsd_decay_iters = None
+    return config
+
+
 def qwenair_text_pretrain_32gpu_b300_bf16_config(
     config_path: str | Path | None = None,
     *,
@@ -243,6 +330,7 @@ def qwenair_text_pretrain_32gpu_b300_bf16_config(
 
 
 __all__ = [
+    "configure_qwenair_indexed_data",
     "qwenair_text_pretrain_32gpu_b300_bf16_config",
     "qwenair_tiny_pretrain_8gpu_b300_bf16_config",
 ]
